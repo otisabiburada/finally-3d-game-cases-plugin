@@ -1,0 +1,14 @@
+{
+  "name": "Finally 3D Game Cases",
+  "author": "SANSO",
+  "flags": [],
+  "api_version": 1,
+  "publish": {
+    "tags": [
+      "customization",
+      "library"
+    ],
+    "description": "Turns the portrait covers in your Gaming Mode library and Home into tilted 3D game cases with a spine, sleeve, gloss and shadow. Per-game and per-collection console looks, wear, works with non-Steam games.",
+    "image": ""
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "compilerOptions": {
+    "target": "ES2020", "module": "ESNext", "moduleResolution": "bundler", "lib": ["ES2020", "DOM"],
+    "jsx": "react", "jsxFactory": "window.SP_REACT.createElement", "jsxFragmentFactory": "window.SP_REACT.Fragment",
+    "strict": true, "noImplicitAny": true, "noImplicitReturns": true, "noUnusedLocals": true, "noUnusedParameters": true,
+    "skipLibCheck": true, "noEmit": true
+  },
+  "files": ["types/mods.d.ts", "types/glob.d.ts", "src/index.tsx", "src/engine.ts", "src/inject.ts"]
+}
