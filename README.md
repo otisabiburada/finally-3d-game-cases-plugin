@@ -30,6 +30,7 @@
 | 🗂️ **Per game and per collection** | Give any game or a whole collection its own look. Bulk-assign many games at once. Looks can also be guessed from collection names. |
 | 📦 **Case shapes** | Keepcase, cartridge case, jewel case or big box, chosen automatically by the look or set by you. |
 | 🧽 **Wear** | Mint, sealed, scuffed, worn, battered, sun-faded or rental. Set by hand, per collection, or let it follow your playtime. |
+| 💿 **Launch animation** | Press Play and the case opens, the disc printed with the game's art goes into the slot, with sounds. Before or after Steam's game logo. |
 | 🫳 **Feels physical** | Smooth turn in and out, a gentle float, a foil shine, a pick-up when you open a game, and neighbours that lean away like books on a shelf. |
 | 🧩 **Non-Steam games** | Shortcuts, emulators and launchers get looks and wear just like Steam games. |
 | 🩺 **Self-check and safe mode** | One button checks everything and saves a report. Safe mode turns everything off and stays off after restarts. |
@@ -61,7 +62,9 @@ sudo cp -r 3d-game-cases ~/homebrew/plugins/
 sudo systemctl restart plugin_loader
 ```
 
-Updating works the same way; your looks and settings are kept.
+### Updating (for example from 1.8.2)
+
+Install the new release zip exactly like the first time: **Install Plugin from URL** with the link of the new zip (or **Install Plugin from ZIP File**, or the Konsole steps above). Decky replaces the old version in place. Your looks, wears, console names and settings are kept, and new options start with sensible defaults.
 
 ## 🕹️ Use
 
@@ -100,6 +103,31 @@ Make your own looks under *Colours → My colours*: pick a colour, strength, lig
 
 Turn on **Cases wear as you play** to let playtime decide: never opened is sealed, a little play stays mint, then light scuffs, well worn and battered. A game you haven't touched for a year goes sun-faded. Choose how fast cases wear: slowly, normal or fast.
 
+## 💿 Launch animation
+
+<p align="center">
+  <img src="docs/images/insert_library.gif" alt="Launching from the library" width="88%">
+  <br><sub>Press Play: the case flies out of its slot, opens, and the disc goes into the Deck.</sub>
+</p>
+
+<p align="center">
+  <img src="docs/images/insert_steps.png" alt="Launch animation step by step" width="100%">
+</p>
+
+<table>
+  <tr>
+    <td align="center" width="50%"><img src="docs/images/insert.gif" alt="Disc" width="100%"><br><sub><b>Disc</b>: printed with the game's cover art, spins up into the slot.</sub></td>
+    <td align="center" width="50%"><img src="docs/images/insert_card.gif" alt="Game card" width="100%"><br><sub><b>Game card</b>: cartridge looks (like Secret Console) insert a card instead.</sub></td>
+  </tr>
+</table>
+
+Turn on **Insert animation on launch** in its own *Insert animation* section. It works on its own, with or without the 3D cases, and plays the moment you press **Play**, in the library or on a game page.
+
+- **Printed with your art:** the case and the disc (or card) use your custom cover first, then Steam's. The art is loaded before the animation starts, and the disc is already sitting in the tray when the case opens.
+- **Before or after the logo:** *Before game logo* plays first and covers the screen, then Steam's launch screen with the game logo appears. *After game logo* lets Steam show the logo first, and plays before Steam's small loading animation.
+- **Sounds:** the case clicks open, the disc lifts, slides into the slot, the drive spins up and the case snaps shut. They're made live with Web Audio, with no sound files. Turn them off with *Insert sounds*.
+- **Slot:** it picks the Deck's bottom slot automatically, or the side slot on a big screen; you can also set it by hand.
+
 ## ⚙️ Settings
 
 | Setting | What it does |
@@ -112,7 +140,9 @@ Turn on **Cases wear as you play** to let playtime decide: never opened is seale
 | Speed | Calm, Normal or Snappy turning in and out. |
 | Gloss · Shadow · Colour band | The plastic look of every case. |
 | Guess look from collection name | Collections called “PS2”, “Xbox 360”, your console names… get that look. |
-| Insert animation on launch *(experimental)* | The disc or game card flies into the slot when a game starts. |
+| Insert animation on launch | Press Play in the library or on a game page: the case opens and the disc or game card, printed with the game's art, goes into the slot. |
+| Before / After game logo | Play the animation before Steam's game-logo launch screen, or after it (before Steam's small loading animation). |
+| Insert sounds | Case clicks, the disc lifting, the slide into the slot, the drive spinning up. |
 | Fallback · Safe mode | See *Troubleshooting*. |
 
 ## 🩺 Troubleshooting
@@ -143,7 +173,7 @@ npm run build      # dist/index.js and dist/inject.js
 npm run package    # release/Finally-3D-Game-Cases-vX.Y.Z.zip
 ```
 
-Pushing a tag like `v1.8.2` runs the GitHub Actions workflow, which builds the zip and attaches it to a GitHub release. The tag must match the version in `package.json`.
+Pushing a tag like `1.9.0` (or `v1.9.0`) runs the GitHub Actions workflow, which builds the zip and attaches it to a GitHub release. The tag must match the version in `package.json`.
 
 ```
 src/index.tsx   Quick Access panel, settings page, startup

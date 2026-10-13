@@ -148,6 +148,21 @@ const provider: Provider = {
       return { minutes: Number(o.minutes_playtime_forever) || 0, last: Number(o.rt_last_time_played) || 0 };
     } catch (e) { return null; }
   },
+  // the same art sources Steam's own cover uses: your custom art first, then the cached and store covers
+  artUrls: (key) => {
+    const out: string[] = [];
+    try {
+      const st = (window as any).appStore;
+      const e = buildIndex().byKey.get(key);
+      const o = st.GetAppOverviewByAppID(e ? e.id : Number(key)) || st.GetAppOverviewByAppID(Number(key) | 0);
+      if (!o) return out;
+      const add = (v: any) => { (Array.isArray(v) ? v : [v]).forEach((u: any) => { if (typeof u === "string" && u && out.indexOf(u) < 0) out.push(u); }); };
+      try { add(st.GetCustomVerticalCapsuleURLs(o)); } catch (x) { /* ignore */ }
+      try { add(st.GetCachedVerticalCapsuleURL(o)); } catch (x) { /* ignore */ }
+      try { if (!(o.BIsModOrShortcut && o.BIsModOrShortcut())) add(st.GetVerticalCapsuleURLForApp(o)); } catch (x) { /* ignore */ }
+    } catch (x) { /* ignore */ }
+    return out;
+  },
 };
 
 interface GameInfo { id: string; name: string; shortcut: boolean }
@@ -158,8 +173,8 @@ function allGames(): GameInfo[] {
   return out;
 }
 
-const VERSION = "1.8.2";
-const lifeStats = { api: false, events: 0, last: 0 };
+const VERSION = "1.9.0";
+const lifeStats = { api: false, events: 0, last: 0, actions: 0 };
 
 // ---------- optional background part (reports, fallback injection, safe-mode file) ----------
 // Every call has a timeout: if the Python part is not running, a callable never answers. The 3D effect never waits for it.
@@ -303,9 +318,24 @@ function bootGuard(): boolean {
 // ---------- game launch / exit notifications (experimental animation + wear refresh) ----------
 
 let lifeHandle: any = null;
+let actionHandle: any = null;
+let taskHandle: any = null;
+let lastAction = { key: "", t: 0 };
+let pending: { key: string; timer: any } | null = null;
+const AFTER_LOGO_MS = 1700; // Steam's logo zooms in and settles in about this time
+function firePending(): void {
+  if (!pending) return;
+  const k = pending.key; clearTimeout(pending.timer); pending = null;
+  void playInsertAny(k);
+}
+function schedulePending(key: string): void {
+  if (pending) clearTimeout(pending.timer);
+  pending = { key, timer: setTimeout(firePending, AFTER_LOGO_MS) };
+}
 
 async function playInsertAny(key: string | null): Promise<void> {
-  if (engine && engine.libraryReachable()) engine.playInsert(key);
+  // the game page may hold no covers at all, so do not require tagged covers here
+  if (engine && (engine.libraryReachable() || !fb.active)) engine.playInsert(key);
   else if (fb.active) await fallbackCall("playInsert", JSON.stringify(key));
 }
 async function refreshAny(): Promise<void> {
@@ -325,15 +355,51 @@ function hookLifetime(): void {
         lifeStats.events++; lifeStats.last = Date.now();
         if (current.safeMode) return;
         const key = normId(n.unAppID !== undefined ? n.unAppID : n.appid);
-        if (n.bRunning) { if (current.insertAnim && key) void playInsertAny(key); }
+        // the Play-button hook usually got here first; this is the backup for launches it did not see
+        if (n.bRunning) { if (current.insertAnim && key && !(lastAction.key === key && Date.now() - lastAction.t < 15000)) void playInsertAny(key); }
         else void refreshAny();
       } catch (e) { /* never let a notification break Steam */ }
     });
   } catch (e) { /* not available */ }
+  // Play pressed anywhere (library, game page, Home): Steam starts a "LaunchApp" game action right away,
+  // seconds before the game process exists, so the animation can play while Steam is still loading.
+  try {
+    const sc: any = (window as any).SteamClient;
+    const reg = sc && sc.Apps && sc.Apps.RegisterForGameActionStart;
+    if (reg) {
+      actionHandle = reg.call(sc.Apps, (_id: any, gameId: any, action: any) => {
+        try {
+          lifeStats.actions++;
+          if (current.safeMode || !current.insertAnim) return;
+          if (typeof action === "string" && action.indexOf("Launch") < 0) return; // installs, uninstalls...
+          const key = normId(gameId);
+          if (!key) return;
+          lastAction = { key, t: Date.now() };
+          if (current.insertWhen === "after") schedulePending(key);
+          else void playInsertAny(key);
+        } catch (e) { /* never let a notification break Steam */ }
+      });
+    }
+    // "after the logo": Steam shows the game logo first; the animation follows once the logo has had its moment,
+    // and at the latest when Steam starts waiting for the game window (the little Steam loading animation comes next).
+    const regTask = sc && sc.Apps && sc.Apps.RegisterForGameActionTaskChange;
+    if (regTask) {
+      taskHandle = regTask.call(sc.Apps, (_id: any, gameId: any, _action: any, task: any) => {
+        try {
+          if (!pending) return;
+          const key = normId(gameId);
+          if (key && key === pending.key && (task === "WaitingGameWindow" || task === "Completed")) firePending();
+        } catch (e) { /* ignore */ }
+      });
+    }
+  } catch (e) { /* not available */ }
 }
 function unhookLifetime(): void {
   try { if (lifeHandle && typeof lifeHandle.unregister === "function") lifeHandle.unregister(); } catch (e) { /* ignore */ }
-  lifeHandle = null;
+  try { if (actionHandle && typeof actionHandle.unregister === "function") actionHandle.unregister(); } catch (e) { /* ignore */ }
+  try { if (taskHandle && typeof taskHandle.unregister === "function") taskHandle.unregister(); } catch (e) { /* ignore */ }
+  if (pending) { clearTimeout(pending.timer); pending = null; }
+  lifeHandle = null; actionHandle = null; taskHandle = null;
 }
 
 // ---------- self-check and saved reports ----------
@@ -373,6 +439,7 @@ async function runSelfCheck(): Promise<{ lines: string[]; failed: boolean }> {
   if (current.fallback !== "off" && !fb.active && fb.error) add("warn", "Fallback injection", `could not start: ${fb.error}`);
   add(lifeStats.api ? "ok" : "fail", "Launch notifications", lifeStats.api ? "Steam's launch notification is available" : "not available; the insert animation and automatic wear refresh cannot work");
   add(lifeStats.events > 0 ? "ok" : "skip", "Launch notification received", lifeStats.events > 0 ? `${lifeStats.events} event(s) since the plugin started` : "none yet; start a game to test it");
+  add(lifeStats.actions > 0 ? "ok" : "skip", "Play button seen", lifeStats.actions > 0 ? `${lifeStats.actions} launch action(s) since the plugin started` : "none yet; press Play on a game to test the insert animation");
   return { lines: out, failed };
 }
 
@@ -742,7 +809,7 @@ function Content() {
       </PanelSection>
       <PanelSection title="Finally 3D Game Cases">
         <PanelSectionRow>
-          <ToggleField label="Enable 3D cases" checked={s.enabled} onChange={(v: boolean) => change({ enabled: v })} />
+          <ToggleField label="3D cases" description="The tilted 3D cases in the library (the insert animation has its own switch below)" checked={s.enabled} onChange={(v: boolean) => change({ enabled: v })} />
         </PanelSectionRow>
         <PanelSectionRow>
           <ButtonItem layout="below" description={`Default: ${styleLabel(s, s.color)}`} onClick={() => { Router.CloseSideMenus(); Navigation.Navigate(PAGE); }}>
@@ -753,6 +820,41 @@ function Content() {
           <ToggleField label="Also on Home and game pages" description="Off = library grids only"
             checked={s.otherScreens} onChange={(v: boolean) => change({ otherScreens: v })} />
         </PanelSectionRow>
+      </PanelSection>
+      <PanelSection title="Insert animation">
+        <PanelSectionRow>
+          <ToggleField label="Insert animation on launch" description="Works on its own, with or without the 3D cases. When you press Play the case opens and the disc or game card, printed with the game's art, goes into the slot."
+            checked={s.insertAnim} onChange={(v: boolean) => change({ insertAnim: v })} />
+        </PanelSectionRow>
+        {s.insertAnim && (<>
+        <PanelSectionRow>
+          <div className="c3d-seg3">
+            {(["auto", "handheld", "console"] as const).map((t) => (
+              <DialogButton key={t} className={s.insertTarget === t ? "on" : ""} onClick={() => change({ insertTarget: t })}>
+                {t === "auto" ? "Slot: auto" : t === "handheld" ? "Bottom slot" : "Side slot"}
+              </DialogButton>
+            ))}
+          </div>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <div className="c3d-seg3" style={{ gridTemplateColumns: "1fr 1fr" }}>
+            {(["before", "after"] as const).map((w) => (
+              <DialogButton key={w} className={s.insertWhen === w ? "on" : ""} onClick={() => change({ insertWhen: w })}>
+                {w === "before" ? "Before game logo" : "After game logo"}
+              </DialogButton>
+            ))}
+          </div>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ToggleField label="Insert sounds" description="Case clicks open, the disc lifts, slides into the slot and the drive spins up"
+            checked={s.insertSound} onChange={(v: boolean) => change({ insertSound: v })} />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem layout="below" onClick={() => { Router.CloseSideMenus(); setTimeout(() => { void playInsertAny(null); }, 450); }}>
+            Preview the animation
+          </ButtonItem>
+        </PanelSectionRow>
+        </>)}
       </PanelSection>
       <PanelSection title="Case shape">
         <PanelSectionRow>
@@ -829,26 +931,6 @@ function Content() {
             </div>
           </PanelSectionRow>
         )}
-      </PanelSection>
-      <PanelSection title="Experimental">
-        <PanelSectionRow>
-          <ToggleField label="Insert animation on launch" description="The case opens and the disc (or game card) flies into the slot when a game starts. May be cut short by Steam's loading screen."
-            checked={s.insertAnim} onChange={(v: boolean) => change({ insertAnim: v })} />
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <div className="c3d-seg3">
-            {(["auto", "handheld", "console"] as const).map((t) => (
-              <DialogButton key={t} className={s.insertTarget === t ? "on" : ""} onClick={() => change({ insertTarget: t })}>
-                {t === "auto" ? "Slot: auto" : t === "handheld" ? "Bottom slot" : "Side slot"}
-              </DialogButton>
-            ))}
-          </div>
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <ButtonItem layout="below" onClick={() => { Router.CloseSideMenus(); setTimeout(() => { void playInsertAny(null); }, 450); }}>
-            Preview the animation
-          </ButtonItem>
-        </PanelSectionRow>
       </PanelSection>
       <PanelSection title="Per-game wear">
         <PanelSectionRow>

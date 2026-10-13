@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.9.0
+Update from 1.8.2: install the new zip the same way you installed 1.8.2. It replaces the old version and keeps all your looks, wears, names and settings.
+
+### Insert animation (new, with its own switch)
+- **Its own section and switch** in the panel; it works with the 3D cases switched off.
+- Plays the moment you press **Play**, in the library or on a game page.
+- The case flies out with a little overshoot, a light sweeps across the cover, and it opens on its hinge with a soft glow in the game's colour behind it.
+- The disc (or a game card for cartridge looks) is printed with the game's cover art (your custom art first, then Steam's) and is already in the tray when the case opens. It lifts with a wobble, swings along an arc, spins up and is pulled into the slot, which sits in a bezel and lights up, with a small jolt when it clicks. Then the case snaps shut and flies back to its place.
+- **Timing:** *Before game logo* (covers the screen, Steam's logo shows after it) or *After game logo* (Steam's logo first, then the animation, before Steam's small loading animation).
+- **Insert sounds:** the case clicks open, the disc lifts, slides into the slot, the drive spins up, the case snaps shut. Made with Web Audio, no sound files.
+- Self-check: new "Play button seen" line.
+
 ## 1.8.2
 - Renamed to **Finally 3D Game Cases**.
 - Steam's focus outline is never cut by the case or its shadow any more.

@@ -145,6 +145,8 @@ export interface Settings {
   pickup: boolean;                       // quick lift when you open a game
   neighbors: boolean;                    // the games next to the one you are on lean away
   speed: "calm" | "normal" | "snappy";   // how fast the case turns in and out
+  insertSound: boolean;                  // sounds for the insert animation
+  insertWhen: "before" | "after";        // play before Steam's game-logo launch screen, or after it
   customs: CustomColor[];                // your own colours
   games: Record<string, StyleId>;        // per-game look, key = app id
   collections: Record<string, StyleId>;  // per-collection look, key = collection id
@@ -152,7 +154,7 @@ export interface Settings {
 
 export const DEFAULTS: Settings = {
   enabled: true, angle: 32, depth: 24, color: "black", gloss: true, shadow: true, band: true,
-  spineTitle: false, float: true, idleTilt: 0, autoGuess: true, names: {}, shape: "auto", wear: "none", playWear: false, wearSpeed: "normal", insertAnim: false, insertTarget: "auto", wears: {}, gameWears: {}, fallback: "auto", safeMode: false, checkedOnce: false, shine: true, otherScreens: false, sleeve: true, pickup: true, neighbors: true, speed: "normal",
+  spineTitle: false, float: true, idleTilt: 0, autoGuess: true, names: {}, shape: "auto", wear: "none", playWear: false, wearSpeed: "normal", insertAnim: false, insertTarget: "auto", wears: {}, gameWears: {}, fallback: "auto", safeMode: false, checkedOnce: false, shine: true, otherScreens: false, sleeve: true, pickup: true, neighbors: true, speed: "normal", insertSound: true, insertWhen: "before",
   customs: [], games: {}, collections: {},
 };
 
@@ -246,6 +248,8 @@ export function sanitize(x: any): Settings {
     pickup: b(x.pickup, DEFAULTS.pickup),
     neighbors: b(x.neighbors, DEFAULTS.neighbors),
     speed: x.speed === "calm" || x.speed === "snappy" ? x.speed : "normal",
+    insertSound: b(x.insertSound, DEFAULTS.insertSound),
+    insertWhen: x.insertWhen === "after" ? "after" : "before",
     customs,
     games: cleanMap(x.games, customs),
     collections: cleanMap(x.collections, customs),
@@ -549,6 +553,8 @@ export interface Provider {
   byName: (name: string) => string | null;
   /** playtime of a game (null when unknown) */
   playInfo: (key: string) => PlayInfo | null;
+  /** the game's portrait cover art addresses, best first (optional) */
+  artUrls?: (key: string) => string[];
 }
 
 // Cover test with no layout reads: portrait artwork (about 2:3, tolerant of 3:4) that is big enough for a capsule.
@@ -1063,7 +1069,9 @@ class DocWatch {
 }
 
 
-// ---------- experimental: the game disc / card flies into the slot when a game launches ----------
+// ---------- experimental: the game disc / card goes into the slot when a game launches ----------
+// One temporary layer above the page, removed again when the animation ends; nothing stays behind.
+// The case and the disc (or game card) are printed with the game's own cover art.
 
 export interface InsertSrc { rect: { left: number; top: number; width: number; height: number } | null; art: string; look: Look }
 
@@ -1073,82 +1081,267 @@ function box(doc: Document, css: string): HTMLElement {
   return e;
 }
 
-// Draws everything on one temporary layer above the page and removes it again; nothing stays behind.
-export function runInsert(doc: Document, src: InsertSrc, target: "auto" | "handheld" | "console"): boolean {
+// Case and disc sounds, made on the spot with Web Audio (no sound files): plastic clicks, the disc lifting,
+// the slide into the slot, the drive spinning up and the final clunk. Times are in ms from the start.
+export function insertSounds(view: Window, card: boolean, volume: number): void {
+  try {
+    const AC: any = (view as any).AudioContext || (view as any).webkitAudioContext;
+    if (!AC) return;
+    const ctx = new AC();
+    if (ctx.state === "suspended" && ctx.resume) ctx.resume();
+    const master = ctx.createGain(); master.gain.value = Math.max(0, Math.min(1, volume)); master.connect(ctx.destination);
+    const t0 = ctx.currentTime + 0.03;
+    const noise = (len: number) => { const b = ctx.createBuffer(1, Math.ceil(ctx.sampleRate * len), ctx.sampleRate); const ch = b.getChannelData(0); for (let i = 0; i < ch.length; i++) ch[i] = Math.random() * 2 - 1; return b; };
+    // short filtered noise burst: plastic click / snap
+    const click = (ms: number, freq: number, len: number, gain: number, q = 2) => {
+      const s = ctx.createBufferSource(); s.buffer = noise(len);
+      const f = ctx.createBiquadFilter(); f.type = "bandpass"; f.frequency.value = freq; f.Q.value = q;
+      const g = ctx.createGain(); const at = t0 + ms / 1000;
+      g.gain.setValueAtTime(0, at); g.gain.linearRampToValueAtTime(gain, at + 0.002); g.gain.exponentialRampToValueAtTime(0.0008, at + len);
+      s.connect(f); f.connect(g); g.connect(master); s.start(at); s.stop(at + len + 0.02);
+    };
+    // low body thump
+    const thump = (ms: number, freq: number, len: number, gain: number) => {
+      const o = ctx.createOscillator(); o.type = "sine"; const g = ctx.createGain(); const at = t0 + ms / 1000;
+      o.frequency.setValueAtTime(freq * 1.6, at); o.frequency.exponentialRampToValueAtTime(freq, at + len * 0.6);
+      g.gain.setValueAtTime(0, at); g.gain.linearRampToValueAtTime(gain, at + 0.004); g.gain.exponentialRampToValueAtTime(0.0008, at + len);
+      o.connect(g); g.connect(master); o.start(at); o.stop(at + len + 0.02);
+    };
+    // sliding: noise swept through a filter
+    const slide = (ms: number, len: number, f1: number, f2: number, gain: number) => {
+      const s = ctx.createBufferSource(); s.buffer = noise(len);
+      const f = ctx.createBiquadFilter(); f.type = "bandpass"; f.Q.value = 1.2; const at = t0 + ms / 1000;
+      f.frequency.setValueAtTime(f1, at); f.frequency.exponentialRampToValueAtTime(f2, at + len);
+      const g = ctx.createGain(); g.gain.setValueAtTime(0, at); g.gain.linearRampToValueAtTime(gain, at + len * 0.3); g.gain.exponentialRampToValueAtTime(0.0008, at + len);
+      s.connect(f); f.connect(g); g.connect(master); s.start(at); s.stop(at + len + 0.02);
+    };
+    // drive motor spinning up
+    const motor = (ms: number, len: number, gain: number) => {
+      const o = ctx.createOscillator(); o.type = "sawtooth"; const lp = ctx.createBiquadFilter(); lp.type = "lowpass"; lp.frequency.value = 900;
+      const g = ctx.createGain(); const at = t0 + ms / 1000;
+      o.frequency.setValueAtTime(70, at); o.frequency.exponentialRampToValueAtTime(240, at + len);
+      g.gain.setValueAtTime(0, at); g.gain.linearRampToValueAtTime(gain, at + len * 0.35); g.gain.exponentialRampToValueAtTime(0.0008, at + len);
+      o.connect(lp); lp.connect(g); g.connect(master); o.start(at); o.stop(at + len + 0.02);
+    };
+    // case: hinge unlatches, cover opens and taps open
+    click(380, 3200, 0.03, 0.55); thump(400, 140, 0.08, 0.25);
+    click(880, 2400, 0.04, 0.35);
+    // disc / card lifts off the hub
+    if (card) { click(900, 4200, 0.025, 0.4); } else { click(890, 5200, 0.02, 0.35); click(915, 3600, 0.03, 0.3); }
+    // into the slot: slide, (disc) motor spin-up, clunk
+    slide(1320, 0.3, 900, 2600, card ? 0.35 : 0.28);
+    if (card) { click(1575, 1800, 0.05, 0.6, 3); thump(1580, 110, 0.12, 0.5); }
+    else { thump(1585, 95, 0.14, 0.5); click(1580, 2200, 0.04, 0.45, 3); motor(1600, 0.55, 0.06); }
+    // case snaps shut
+    click(1850, 2800, 0.035, 0.5); thump(1855, 160, 0.07, 0.25);
+    view.setTimeout(() => { try { ctx.close(); } catch (e) { /* ignore */ } }, 3200);
+  } catch (e) { /* no sound is fine */ }
+}
+
+export function runInsert(doc: Document, src: InsertSrc, target: "auto" | "handheld" | "console", sound = true): boolean {
   const view = doc.defaultView;
-  if (!view || !doc.body || doc.getElementById("sanso-insert") || typeof (doc.body as any).animate !== "function") return false;
+  if (!view || !doc.body || typeof (doc.body as any).animate !== "function") return false;
+  const old = doc.getElementById("sanso-insert");
+  if (old) old.remove(); // a newer launch replaces one still playing
   const W = view.innerWidth, H = view.innerHeight;
   const variant = target === "auto" ? (W >= 1800 ? "console" : "handheld") : target;
   const L = src.look, pal = L.pal;
-  const art = src.art ? `url(${JSON.stringify(src.art)})` : "none";
-
-  let r = src.rect;
-  if (!r || r.width < 30 || r.height < 30 || r.top > H || r.top + r.height < 0) {
-    const w = Math.round(H * 0.3), h = Math.round(w * 1.5);
-    r = { left: Math.round(W / 2 - w / 2), top: Math.round(H * 0.28), width: w, height: h };
-  }
-  const d = Math.max(6, L.depthPx);
-  const root = doc.createElement("div");
-  root.id = "sanso-insert";
-  root.style.cssText = `position:fixed;left:0;top:0;width:${W}px;height:${H}px;z-index:2147483000;pointer-events:none;overflow:hidden;perspective:1300px;`;
-
-  // the case: body + a front cover that swings open on its left hinge
-  const ghost = box(doc, `left:${r.left}px;top:${r.top}px;width:${r.width}px;height:${r.height}px;transform-style:preserve-3d;`);
-  ghost.appendChild(box(doc, `inset:0;background:${pal.b};transform:translateZ(-${d}px);`));
-  ghost.appendChild(box(doc, `top:2%;bottom:2%;left:3%;right:3%;background:linear-gradient(150deg,rgba(255,255,255,.10),rgba(0,0,0,.35)),${pal.b};transform:translateZ(-${d - 1}px);`));
-  ghost.appendChild(box(doc, `top:0;bottom:0;left:0;width:${d}px;transform-origin:left center;transform:rotateY(90deg);background:linear-gradient(90deg,${pal.a},${pal.b});`));
-  ghost.appendChild(box(doc, `top:0;left:0;right:0;height:${d}px;transform-origin:center top;transform:rotateX(-90deg);background:linear-gradient(0deg,${pal.b},${pal.a});`));
-  ghost.appendChild(box(doc, `bottom:0;left:0;right:0;height:${d}px;transform-origin:center bottom;transform:rotateX(90deg);background:linear-gradient(180deg,${pal.b},#000);`));
-  const front = box(doc, "inset:0;transform-origin:left center;transform-style:preserve-3d;");
-  front.appendChild(box(doc, `inset:0;backface-visibility:hidden;background:${art} center/cover no-repeat;border-radius:${L.shape.radius}px;box-shadow:inset 0 0 0 1px ${pal.line};`));
-  front.appendChild(box(doc, `inset:0;backface-visibility:hidden;background:linear-gradient(115deg,rgba(255,255,255,.34),rgba(255,255,255,0) 40%);border-radius:${L.shape.radius}px;transform:translateZ(1px);`));
-  front.appendChild(box(doc, `inset:0;backface-visibility:hidden;transform:rotateY(180deg);background:linear-gradient(135deg,${pal.a},${pal.b});border-radius:${L.shape.radius}px;`));
-  ghost.appendChild(front);
-  root.appendChild(ghost);
-
-  // the thing that goes into the slot: a disc, or a game card for the cartridge case
+  const art = src.art ? `url(${JSON.stringify(src.art)})` : `linear-gradient(160deg, ${pal.a}, ${pal.b})`;
   const card = L.shapeId === "cartridge";
-  const D = Math.round(card ? r.width * 0.62 : Math.min(r.width * 0.82, r.height * 0.6));
-  const cx = r.left + r.width / 2, cy = r.top + r.height * 0.48;
-  const item = box(doc, `left:${Math.round(cx - D / 2)}px;top:${Math.round(cy - D / 2)}px;width:${D}px;height:${card ? Math.round(D * 1.18) : D}px;opacity:0;will-change:transform;`);
-  if (card) {
-    item.style.borderRadius = "5px";
-    item.style.clipPath = "polygon(0 0, 78% 0, 100% 14%, 100% 100%, 0 100%)";
-    item.style.background = `${art} center top / 100% 62% no-repeat, linear-gradient(180deg,#2b2d33,#0c0d10)`;
-    item.style.boxShadow = "inset 0 0 0 2px rgba(255,255,255,.25)";
-    item.appendChild(box(doc, "left:12%;right:12%;bottom:7%;height:9%;background:repeating-linear-gradient(90deg,#d9b44a 0 3px,transparent 3px 6px);"));
-  } else {
-    item.style.borderRadius = "50%";
-    item.style.background = "radial-gradient(circle, #101216 0 8%, #e8ebf0 8.5% 11%, transparent 11.5%), conic-gradient(from 20deg, #ff7ed0, #7ecbff, #9bffb0, #fff48a, #ffa77e, #ff7ed0)";
-    item.style.boxShadow = "0 0 0 1px rgba(255,255,255,.4), 0 6px 18px rgba(0,0,0,.5)";
-    item.appendChild(box(doc, `left:22%;top:22%;width:56%;height:56%;border-radius:50%;background:${art} center/cover no-repeat;box-shadow:inset 0 0 0 2px rgba(0,0,0,.35);`));
-    item.appendChild(box(doc, "left:44%;top:44%;width:12%;height:12%;border-radius:50%;background:#0b0c0f;box-shadow:0 0 0 2px #e8ebf0;"));
-  }
-  root.appendChild(item);
+  const rad = Math.max(3, L.shape.radius + 2);
 
-  // the slot
-  const slot = variant === "console"
-    ? box(doc, `right:2px;top:${Math.round(H * 0.5)}px;width:6px;height:${Math.round(H * 0.24)}px;border-radius:3px;background:#0a0b0e;box-shadow:0 0 0 1px rgba(255,255,255,.25);opacity:0;`)
-    : box(doc, `left:${Math.round(W * 0.37)}px;bottom:2px;width:${Math.round(W * 0.26)}px;height:6px;border-radius:3px;background:#0a0b0e;box-shadow:0 0 0 1px rgba(255,255,255,.25);opacity:0;`);
+  // final size and place of the case: big and centred a little to the right, so the cover can swing open to the left
+  const ch = Math.round(Math.min(H * 0.56, W * 0.42 * 1.5)), cw = Math.round(ch / 1.5);
+  const cx = Math.round(W * 0.56 - cw / 2), cy = Math.round(H * 0.42 - ch / 2);
+  const d = Math.max(10, Math.round(cw * (card ? 0.06 : 0.1)));
+  // where it starts: the cover on screen, or a little smaller in the same place
+  const r0 = src.rect && src.rect.width > 30 && src.rect.top < H && src.rect.top + src.rect.height > 0 ? src.rect : null;
+  const s0 = r0 ? r0.width / cw : 0.82;
+  const x0 = r0 ? r0.left + r0.width / 2 - (cx + cw / 2) : 0, y0 = r0 ? r0.top + r0.height / 2 - (cy + ch / 2) : 30;
+
+  const root = box(doc, `position:fixed;left:0;top:0;width:${W}px;height:${H}px;z-index:2147483000;pointer-events:none;overflow:hidden;perspective:1500px;perspective-origin:50% 38%;`);
+  root.id = "sanso-insert";
+  // nearly opaque: Steam's launch screen (the big game logo) is only revealed once the case has played
+  const shade = box(doc, `inset:0;background:radial-gradient(120% 95% at 55% 40%, rgb(16,21,32), rgb(3,4,8));opacity:0;`);
+  root.appendChild(shade);
+
+  // soft light behind the case in the game's colour
+  const glow = box(doc, `left:${Math.round(cx - cw * 0.9)}px;top:${Math.round(cy - ch * 0.35)}px;width:${Math.round(cw * 2.8)}px;height:${Math.round(ch * 1.7)}px;border-radius:50%;background:radial-gradient(closest-side, ${pal.a}, transparent);opacity:0;filter:blur(30px);`);
+  root.appendChild(glow);
+  // ---- the case ----
+  const wrap = box(doc, `left:${cx}px;top:${cy}px;width:${cw}px;height:${ch}px;perspective:1400px;perspective-origin:50% 35%;`);
+  // contact shadow on the "floor" under the case
+  const floor = box(doc, `left:-8%;right:-8%;bottom:-9%;height:12%;border-radius:50%;background:radial-gradient(closest-side, rgba(0,0,0,.7), rgba(0,0,0,0));`);
+  wrap.appendChild(floor);
+  const stage = box(doc, `inset:0;transform-style:preserve-3d;`);
+  wrap.appendChild(stage);
+  const shell = `linear-gradient(135deg, rgba(255,255,255,.10), rgba(0,0,0,.25)), ${pal.b}`;
+  stage.appendChild(box(doc, `inset:0;border-radius:${rad}px;background:${shell};transform:translateZ(-${d}px);box-shadow:0 30px 60px rgba(0,0,0,.55);`));
+  // inside: dark plastic tray with the hub (or a card slot)
+  const tray = card
+    ? `linear-gradient(180deg, rgba(255,255,255,.05), rgba(0,0,0,.2)), repeating-linear-gradient(90deg, rgba(255,255,255,.025) 0 2px, transparent 2px 6px), #15171c`
+    : `radial-gradient(circle at 50% 50%, #3d424b 0 4.5%, #0b0c0f 5% 6.5%, #2c3038 7% 10.5%, #121418 11% 42%, rgba(255,255,255,.07) 42.6% 43.4%, #14161b 44% 100%)`;
+  stage.appendChild(box(doc, `left:4%;top:3%;right:4%;bottom:3%;border-radius:${Math.max(2, rad - 2)}px;background:${tray};transform:translateZ(-${d - 2}px);box-shadow:inset 0 0 0 1px rgba(255,255,255,.06), inset 0 8px 18px rgba(0,0,0,.5);`));
+  if (card) stage.appendChild(box(doc, `left:22%;top:16%;width:56%;height:40%;border-radius:6px;background:rgba(0,0,0,.55);box-shadow:inset 0 0 0 2px rgba(255,255,255,.07);transform:translateZ(-${d - 3}px);`));
+  // walls: spine (left, hinge side), top, bottom, right
+  stage.appendChild(box(doc, `top:0;bottom:0;left:0;width:${d}px;transform-origin:left center;transform:rotateY(90deg);background:linear-gradient(90deg, ${pal.a}, ${pal.b});`));
+  stage.appendChild(box(doc, `top:0;bottom:0;right:0;width:${d}px;transform-origin:right center;transform:rotateY(-90deg);background:linear-gradient(270deg, ${pal.b}, ${pal.a});`));
+  stage.appendChild(box(doc, `left:0;right:0;top:0;height:${d}px;transform-origin:center top;transform:rotateX(-90deg);background:linear-gradient(0deg, ${pal.b}, ${pal.a});`));
+  stage.appendChild(box(doc, `left:0;right:0;bottom:0;height:${d}px;transform-origin:center bottom;transform:rotateX(90deg);background:linear-gradient(180deg, ${pal.b}, #000);`));
+  // the front cover swings open on the spine
+  const cover = box(doc, `inset:0;transform-origin:left center;transform-style:preserve-3d;`);
+  cover.appendChild(box(doc, `inset:0;border-radius:${rad}px;backface-visibility:hidden;background:${art} center/cover no-repeat, ${pal.b};box-shadow:inset 0 0 0 1px ${pal.line};`));
+  cover.appendChild(box(doc, `inset:0;border-radius:${rad}px;backface-visibility:hidden;transform:translateZ(.6px);background:linear-gradient(90deg, rgba(0,0,0,.35) 0, rgba(255,255,255,.28) 1.6%, rgba(0,0,0,.15) 3.4%, transparent 7%), linear-gradient(115deg, rgba(255,255,255,.34), rgba(255,255,255,0) 32%, rgba(255,255,255,0) 62%, rgba(255,255,255,.12) 74%, transparent 76%);box-shadow:inset 0 0 0 1px rgba(255,255,255,.3), inset 0 0 0 4px rgba(255,255,255,.08);`));
+  // inside of the cover: the dark sleeve with the art showing faintly through, and the manual clips
+  // a light sweep across the cover as the case turns towards you
+  const glint = box(doc, `inset:0;border-radius:${rad}px;backface-visibility:hidden;transform:translateZ(.8px);overflow:hidden;`);
+  const glintBar = box(doc, `top:-20%;bottom:-20%;left:-60%;width:45%;background:linear-gradient(100deg, transparent, rgba(255,255,255,.38), transparent);transform:skewX(-14deg);`);
+  glint.appendChild(glintBar);
+  cover.appendChild(glint);
+  cover.appendChild(box(doc, `inset:0;border-radius:${rad}px;backface-visibility:hidden;transform:rotateY(180deg);background:linear-gradient(rgba(12,14,19,.84), rgba(12,14,19,.92)), ${art} center/cover no-repeat;box-shadow:inset 0 0 0 1px rgba(255,255,255,.08);`));
+  stage.appendChild(cover);
+  root.appendChild(wrap);
+
+  // ---- the disc / card (its own flat layer so the slot can hide it as it goes in) ----
+  const handheld = variant !== "console";
+  const slotY = H - 7, slotX = W - 7;
+  const layer = box(doc, `inset:0;${handheld ? `clip-path:inset(0 0 ${H - slotY}px 0);` : `clip-path:inset(0 ${W - slotX}px 0 0);`}`);
+  const D = Math.round(card ? cw * 0.5 : cw * 0.76);
+  const DH = card ? Math.round(D * 1.16) : D;
+  const dcx = cx + cw / 2, dcy = cy + ch * (card ? 0.36 : 0.5);
+  const holder = box(doc, `left:${Math.round(dcx - D / 2)}px;top:${Math.round(dcy - DH / 2)}px;width:${D}px;height:${DH}px;opacity:0;will-change:transform,opacity;`);
+  const shadow = box(doc, `left:6%;top:9%;width:88%;height:88%;border-radius:${card ? "10px" : "50%"};background:rgba(0,0,0,.55);filter:blur(10px);`);
+  holder.appendChild(shadow);
+  // the disc / card, printed with the game's art (built twice: one sits in the tray, one flies to the slot)
+  const makeItem = (): { el: HTMLElement; spin: HTMLElement | null } => {
+    const el = box(doc, "inset:0;");
+    if (card) {
+      const c = box(doc, `inset:0;border-radius:7px;clip-path:polygon(0 0, 80% 0, 100% 12%, 100% 100%, 0 100%);background:linear-gradient(180deg,#2c2f36,#101216);box-shadow:inset 0 0 0 2px rgba(255,255,255,.18);`);
+      c.appendChild(box(doc, `left:7%;top:6%;right:7%;height:62%;border-radius:4px;background:${art} center/cover no-repeat;box-shadow:0 0 0 2px rgba(255,255,255,.85);`));
+      c.appendChild(box(doc, `left:14%;right:14%;bottom:6%;height:10%;background:repeating-linear-gradient(90deg,#e0bf55 0 3px,#8a6d1c 3px 4px,transparent 4px 7px);border-radius:2px;`));
+      c.appendChild(box(doc, `inset:0;background:linear-gradient(120deg, rgba(255,255,255,.28), rgba(255,255,255,0) 40%);`));
+      el.appendChild(c);
+      return { el, spin: null };
+    }
+    const hole = "radial-gradient(circle, transparent 0 6.2%, #000 6.6%)";
+    const spin = box(doc, `inset:0;border-radius:50%;background:${art} center/cover no-repeat, ${pal.b};-webkit-mask:${hole};mask:${hole};`);
+    // clear hub ring and the outer rim (they spin with the print)
+    spin.appendChild(box(doc, `inset:0;border-radius:50%;background:radial-gradient(circle, transparent 0 6.4%, rgba(230,236,245,.62) 6.8% 15.2%, rgba(255,255,255,.95) 15.5% 16.1%, rgba(0,0,0,.25) 16.4% 17%, transparent 17.4% 95.6%, rgba(255,255,255,.7) 96.2% 97.4%, rgba(0,0,0,.45) 98%);`));
+    el.appendChild(spin);
+    // light on the disc stays still while it spins (plain alpha: blend modes would flatten the 3D case)
+    el.appendChild(box(doc, `inset:0;border-radius:50%;-webkit-mask:${hole};mask:${hole};background:conic-gradient(from 40deg, rgba(255,255,255,0) 0, rgba(255,255,255,.30) 6%, rgba(160,220,255,.14) 11%, rgba(255,255,255,0) 17%, rgba(255,255,255,0) 50%, rgba(255,255,255,.26) 56%, rgba(255,190,240,.12) 61%, rgba(255,255,255,0) 67%);`));
+    return { el, spin };
+  };
+  const flying = makeItem();
+  holder.appendChild(flying.el);
+  const spinner = flying.spin;
+  // the copy that sits in the tray from the start, so the case is never empty when it opens
+  const seated = makeItem();
+  const seat = box(doc, `left:${Math.round(cw / 2 - D / 2)}px;top:${Math.round(ch * (card ? 0.36 : 0.5) - DH / 2)}px;width:${D}px;height:${DH}px;transform:translateZ(-${d - 3}px);`);
+  seat.appendChild(seated.el);
+  stage.appendChild(seat);
+  layer.appendChild(holder);
+  root.appendChild(layer);
+
+  // ---- the slot ----
+  const slot = handheld
+    ? box(doc, `left:${Math.round(W / 2 - D * 0.62)}px;top:${slotY - 3}px;width:${Math.round(D * 1.24)}px;height:7px;border-radius:4px;background:linear-gradient(180deg,#000,#1b1e24);box-shadow:0 0 0 1px rgba(255,255,255,.16), 0 -1px 0 rgba(255,255,255,.25);opacity:0;`)
+    : box(doc, `left:${slotX - 3}px;top:${Math.round(H / 2 - D * 0.62)}px;width:7px;height:${Math.round(D * 1.24)}px;border-radius:4px;background:linear-gradient(90deg,#000,#1b1e24);box-shadow:0 0 0 1px rgba(255,255,255,.16), -1px 0 0 rgba(255,255,255,.25);opacity:0;`);
+  const bezel = handheld
+    ? box(doc, `left:${Math.round(W / 2 - D * 0.8)}px;top:${slotY - 12}px;width:${Math.round(D * 1.6)}px;height:24px;border-radius:12px;background:linear-gradient(180deg, #2a2e36, #121418);box-shadow:inset 0 1px 0 rgba(255,255,255,.12), 0 6px 18px rgba(0,0,0,.6);opacity:0;`)
+    : box(doc, `left:${slotX - 12}px;top:${Math.round(H / 2 - D * 0.8)}px;width:24px;height:${Math.round(D * 1.6)}px;border-radius:12px;background:linear-gradient(90deg, #2a2e36, #121418);box-shadow:inset 1px 0 0 rgba(255,255,255,.12), 0 6px 18px rgba(0,0,0,.6);opacity:0;`);
+  const streak = box(doc, handheld
+    ? `left:0;top:2px;width:30%;height:2px;border-radius:2px;background:linear-gradient(90deg, transparent, rgba(150,215,255,.95), transparent);opacity:0;`
+    : `top:0;left:2px;height:30%;width:2px;border-radius:2px;background:linear-gradient(180deg, transparent, rgba(150,215,255,.95), transparent);opacity:0;`);
+  slot.appendChild(streak);
+  root.insertBefore(bezel, layer);
   root.appendChild(slot);
   doc.body.appendChild(root);
 
-  const tx = variant === "console" ? W + D - cx : W / 2 - cx;
-  const ty = variant === "console" ? Math.round(H * 0.62) - cy : H + D * 0.15 - cy;
-  const tilt = variant === "console" ? "rotateY(75deg)" : "rotateX(75deg)";
+  // ---- timeline (ms) ----
   const fx: Animation[] = [];
   const A = (el: HTMLElement, kf: Keyframe[], o: KeyframeAnimationOptions) => { fx.push(el.animate(kf, { fill: "both", ...o })); };
-  A(front, [{ transform: "rotateY(0deg)" }, { transform: "rotateY(-118deg)" }], { duration: 420, easing: "cubic-bezier(.2,.7,.2,1)" });
-  A(item, [
-    { opacity: 0, transform: "translate(0,0) scale(.9) rotateZ(0deg)", offset: 0 },
-    { opacity: 1, transform: "translate(0,0) scale(.95) rotateZ(0deg)", offset: 0.08 },
-    { opacity: 1, transform: `translate(0px,${Math.round(-r.height * 0.16)}px) scale(1.04) rotateZ(${card ? 0 : 50}deg)`, offset: 0.34 },
-    { opacity: 1, transform: `translate(${Math.round(tx)}px,${Math.round(ty)}px) ${tilt} scale(.42) rotateZ(${card ? 0 : 700}deg)`, offset: 1 },
-  ], { duration: 1250, delay: 260, easing: "cubic-bezier(.45,0,.55,1)" });
-  A(slot, [{ opacity: 0, boxShadow: "0 0 0 1px rgba(255,255,255,.25)" }, { opacity: 1, boxShadow: "0 0 18px 4px rgba(120,200,255,.9)" }, { opacity: 0.2, boxShadow: "0 0 0 1px rgba(255,255,255,.25)" }], { duration: 700, delay: 1000 });
-  A(ghost, [{ opacity: 1 }, { opacity: 1, offset: 0.7 }, { opacity: 0 }], { duration: 1700 });
-  const done = () => { try { root.remove(); } catch (e) { /* ignore */ } };
-  setTimeout(done, 1900);
+  // fly in 0-420, open 380-900, disc shows 780, lifts 880-1060, travels 1060-1560, close 1520-1860, fade out to 2100
+  const T_END = 2200;
+  const at = (ms: number) => Math.min(1, Math.max(0, ms / T_END));
+  A(shade, [{ opacity: 0 }, { opacity: 1, offset: at(200) }, { opacity: 1, offset: at(1880) }, { opacity: 0 }], { duration: T_END, easing: "ease-in-out" });
+  // seated copy hands over to the flying one at the same spot
+  A(seat, [{ opacity: 1 }, { opacity: 1, offset: at(880) }, { opacity: 0, offset: at(881) }, { opacity: 0 }], { duration: T_END, easing: "linear" });
+  const back = r0 ? `translate(${x0}px,${y0}px) scale(${s0})` : `translate(0,${Math.round(ch * 0.08)}px) scale(.88)`;
+  A(glow, [{ opacity: 0 }, { opacity: 0.55, offset: at(500) }, { opacity: 0.4, offset: at(1500) }, { opacity: 0, offset: at(1900) }, { opacity: 0 }], { duration: T_END, easing: "ease-in-out" });
+  // fly out with a little overshoot, settle, then go back where it came from
+  A(wrap, [
+    { transform: `translate(${x0}px,${y0}px) scale(${s0})`, opacity: 1, easing: "cubic-bezier(.2,.8,.3,1)" },
+    { transform: "translate(0,-6px) scale(1.035)", opacity: 1, offset: at(360), easing: "cubic-bezier(.4,0,.3,1)" },
+    { transform: "translate(0,0) scale(1)", opacity: 1, offset: at(520) },
+    { transform: "translate(0,0) scale(1)", opacity: 1, offset: at(1640), easing: "cubic-bezier(.6,0,.4,1)" },
+    { transform: back, opacity: 1, offset: at(1900), easing: "ease-in" },
+    { transform: back, opacity: 0, offset: at(1990) },
+    { transform: back, opacity: 0 },
+  ], { duration: T_END });
+  A(floor, [{ opacity: 0, transform: "scale(.6)" }, { opacity: 1, transform: "scale(1)", offset: at(420) }, { opacity: 1, transform: "scale(1)", offset: at(1640) }, { opacity: 0, transform: "scale(.7)", offset: at(1880) }, { opacity: 0 }], { duration: T_END, easing: "ease-out" });
+  A(glintBar, [{ transform: "translateX(0) skewX(-14deg)" }, { transform: "translateX(0) skewX(-14deg)", offset: at(80) }, { transform: `translateX(${Math.round(cw * 2.6)}px) skewX(-14deg)`, offset: at(560) }, { transform: `translateX(${Math.round(cw * 2.6)}px) skewX(-14deg)` }], { duration: T_END, easing: "cubic-bezier(.4,0,.2,1)" });
+  A(stage, [
+    { transform: "rotateX(0deg) rotateY(0deg)", easing: "cubic-bezier(.2,.8,.3,1)" },
+    { transform: "rotateX(8deg) rotateY(-22deg)", offset: at(480), easing: "ease-in-out" },
+    { transform: "rotateX(6deg) rotateY(-14deg)", offset: at(1500), easing: "ease-in-out" },
+    { transform: "rotateX(5deg) rotateY(-10deg)", offset: at(1830), easing: "ease-out" },
+    { transform: "rotateX(3deg) rotateY(-12deg)", offset: at(1870), easing: "ease-in-out" }, // little bump when the cover snaps shut
+    { transform: "rotateX(0deg) rotateY(0deg)" },
+  ], { duration: T_END });
+  // the cover swings open, overshoots the hinge stop a touch and settles; later it snaps shut
+  A(cover, [
+    { transform: "rotateY(0deg)" },
+    { transform: "rotateY(0deg)", offset: at(380), easing: "cubic-bezier(.5,0,.3,1)" },
+    { transform: "rotateY(-168deg)", offset: at(860), easing: "ease-in-out" },
+    { transform: "rotateY(-157deg)", offset: at(960), easing: "ease-in-out" },
+    { transform: "rotateY(-160deg)", offset: at(1040) },
+    { transform: "rotateY(-160deg)", offset: at(1520), easing: "cubic-bezier(.55,0,.85,.35)" },
+    { transform: "rotateY(0deg)", offset: at(1830) },
+    { transform: "rotateY(0deg)" },
+  ], { duration: T_END });
+  // the disc / card: lifts out with a small wobble, swings along an arc, turns edge-on and is pulled into the slot
+  const tx = handheld ? W / 2 - dcx : slotX + D * 0.7 - dcx;
+  const ty = handheld ? slotY + DH * 0.62 - dcy : H / 2 - dcy;
+  const preX = handheld ? W / 2 - dcx : slotX - D * 0.8 - dcx;
+  const preY = handheld ? slotY - DH * 0.75 - dcy : H / 2 - dcy;
+  const midX = handheld ? preX * 0.5 - D * 0.18 : preX * 0.5, midY = handheld ? preY * 0.42 : preY * 0.5 - DH * 0.25;
+  const edge = handheld ? (card ? "rotateX(0deg)" : "rotateX(72deg)") : (card ? "rotateY(0deg)" : "rotateY(72deg)");
+  const half = handheld ? (card ? "rotateX(0deg) rotateZ(-6deg)" : "rotateX(30deg) rotateZ(-4deg)") : (card ? "rotateY(0deg)" : "rotateY(30deg)");
+  const inTray = "rotateX(6deg) rotateY(-14deg)";
+  const P = (x: number, y: number, r: string, s: number) => `perspective(1000px) translate(${Math.round(x)}px,${Math.round(y)}px) ${r} scale(${s})`;
+  A(holder, [
+    { opacity: 0, transform: P(0, 0, inTray, 0.97) },
+    { opacity: 0, transform: P(0, 0, inTray, 0.97), offset: at(879) },
+    { opacity: 1, transform: P(0, 0, inTray, 0.97), offset: at(880), easing: "cubic-bezier(.2,.8,.3,1)" },
+    { opacity: 1, transform: P(0, -ch * 0.06, "rotateX(-4deg) rotateY(3deg)", 1.07), offset: at(1010), easing: "ease-in-out" },
+    { opacity: 1, transform: P(0, -ch * 0.055, "rotateX(2deg) rotateY(-2deg)", 1.06), offset: at(1080), easing: "cubic-bezier(.45,0,.55,1)" },
+    { opacity: 1, transform: P(midX, midY, half, 0.95), offset: at(1250), easing: "cubic-bezier(.45,0,.55,1)" },
+    { opacity: 1, transform: P(preX, preY, edge, 0.84), offset: at(1430), easing: "cubic-bezier(.6,0,1,.5)" },
+    { opacity: 1, transform: P(tx, ty, edge, 0.82), offset: at(1580) },
+    { opacity: 0, transform: P(tx, ty, edge, 0.82) },
+  ], { duration: T_END });
+  // a tiny jolt when it clicks in
+  A(root, [{ transform: "translate(0,0)" }, { transform: "translate(0,0)", offset: at(1575) }, { transform: "translate(0,2.5px)", offset: at(1605) }, { transform: "translate(0,-1px)", offset: at(1650) }, { transform: "translate(0,0)", offset: at(1700) }, { transform: "translate(0,0)" }], { duration: T_END, easing: "ease-out" });
+  A(bezel, [{ opacity: 0, transform: "translateY(10px)" }, { opacity: 0, transform: "translateY(10px)", offset: at(900) }, { opacity: 1, transform: "translateY(0)", offset: at(1120) }, { opacity: 1, transform: "translateY(0)", offset: at(1760) }, { opacity: 0, transform: "translateY(8px)", offset: at(2000) }, { opacity: 0 }], { duration: T_END, easing: "cubic-bezier(.2,.8,.3,1)" });
+  A(streak, handheld
+    ? [{ opacity: 0, transform: "translateX(0)" }, { opacity: 0, transform: "translateX(0)", offset: at(1560) }, { opacity: 1, transform: `translateX(${Math.round(D * 0.6)}px)`, offset: at(1650) }, { opacity: 0, transform: `translateX(${Math.round(D * 1.24)}px)`, offset: at(1780) }, { opacity: 0 }]
+    : [{ opacity: 0, transform: "translateY(0)" }, { opacity: 0, transform: "translateY(0)", offset: at(1560) }, { opacity: 1, transform: `translateY(${Math.round(D * 0.6)}px)`, offset: at(1650) }, { opacity: 0, transform: `translateY(${Math.round(D * 1.24)}px)`, offset: at(1780) }, { opacity: 0 }],
+    { duration: T_END, easing: "linear" });
+  A(shadow, [{ opacity: 0.9, transform: "translate(0,0)" }, { opacity: 0.9, transform: "translate(0,0)", offset: at(880) }, { opacity: 0.45, transform: `translate(${Math.round(D * 0.06)}px,${Math.round(D * 0.1)}px)`, offset: at(1060) }, { opacity: 0, offset: at(1400) }, { opacity: 0 }], { duration: T_END, easing: "linear" });
+  if (spinner) A(spinner, [{ transform: "rotate(0deg)" }, { transform: "rotate(0deg)", offset: at(900), easing: "cubic-bezier(.5,0,.8,.5)" }, { transform: "rotate(1080deg)", offset: at(1580) }, { transform: "rotate(1080deg)" }], { duration: T_END });
+  A(slot, [
+    { opacity: 0, transform: "scale(.9)" },
+    { opacity: 0, transform: "scale(.9)", offset: at(950) },
+    { opacity: 1, transform: "scale(1)", offset: at(1150) },
+    { opacity: 1, transform: "scale(1)", offset: at(1480) },
+    { opacity: 1, transform: "scale(1.05)", boxShadow: "0 0 0 1px rgba(170,225,255,.95), 0 0 24px 7px rgba(80,170,255,.8)", offset: at(1600) },
+    { opacity: 1, transform: "scale(1)", boxShadow: "0 0 0 1px rgba(170,225,255,.6), 0 0 14px 3px rgba(80,170,255,.4)", offset: at(1800) },
+    { opacity: 0, transform: "scale(1)" },
+  ], { duration: T_END, easing: "ease-out" });
+  if (sound) insertSounds(view, card, 0.85);
+  const done = () => { fx.forEach((a) => { try { a.cancel(); } catch (e) { /* ignore */ } }); try { if (root.isConnected) root.remove(); } catch (e) { /* ignore */ } };
+  setTimeout(done, T_END + 80);
   return true;
 }
 
@@ -1337,29 +1530,71 @@ export class Engine {
   }
 
   /** Play the insert animation for a game (key = unsigned app id) or, with null, for any visible cover. */
+  private lastInsert = { key: "", t: 0 };
+  /** Play the insert animation for a game (key = unsigned app id). With null: the game page you are on, or any visible cover. */
   playInsert(key: string | null): boolean {
+    // Steam's windows: the watched ones, or (3D cases switched off) straight from Steam, so the animation works on its own
+    let docs: Document[] = Array.from(this.watches.keys());
+    if (!docs.length) { try { docs = this.prov.getDocs().filter((x) => !!x && !!x.body); } catch (e) { docs = []; } }
+    // the game page you are on (Play pressed there, or Preview)
+    let pageDoc: Document | null = null;
+    if (key === null) {
+      docs.forEach((dd) => {
+        const m = /\/library\/app\/(\d+)/.exec(screenPath(dd));
+        if (m && !dd.hidden && !pageDoc) { key = normId(m[1]) || null; pageDoc = dd; }
+      });
+    }
+    if (key !== null) {
+      const now = Date.now();
+      if (this.lastInsert.key === key && now - this.lastInsert.t < 8000) return false; // launch reported twice
+      this.lastInsert = { key, t: now };
+    }
     let best: { w: DocWatch; tr: Tracked; rect: DOMRect } | null = null;
     this.watches.forEach((w) => {
+      if (w.doc.hidden) return;
       w.tracked.forEach((tr) => {
         if (best || !tr.img.isConnected || (key !== null && tr.appid !== key)) return;
         let rect: DOMRect | null = null;
         try { rect = tr.img.getBoundingClientRect(); } catch (e) { rect = null; }
-        if (rect && rect.width > 20 && rect.height > 20) best = { w, tr, rect };
+        const vh = w.doc.defaultView ? w.doc.defaultView.innerHeight : 0;
+        if (rect && rect.width > 20 && rect.height > 20 && rect.bottom > 0 && rect.top < vh) best = { w, tr, rect };
       });
     });
-    const lookKey = key !== null ? key : best ? (best as any).tr.appid : null;
-    let doc: Document | null = best ? (best as any).w.doc : null;
+    const b: any = best;
+    const lookKey = key !== null ? key : b ? b.tr.appid : null;
+    let doc: Document | null = b ? b.w.doc : pageDoc;
     if (!doc) {
-      // not on screen: use the largest watched window (the library) with a centred disc
+      // not on screen (game page, Home...): the biggest visible Steam window
       let most = -1;
-      this.watches.forEach((w) => { if (w.tracked.size > most) { most = w.tracked.size; doc = w.doc; } });
-      if (!doc) { const first = this.watches.keys().next(); doc = first.done ? null : first.value; }
+      docs.forEach((dd) => {
+        const v = dd.defaultView; const area = v && !dd.hidden ? v.innerWidth * v.innerHeight : 0;
+        if (area > most) { most = area; doc = dd; }
+      });
     }
     if (!doc) return false;
     const look = lookFor(this.settings, this.prov, lookKey);
-    const b: any = best;
     const rect = b ? { left: b.rect.left, top: b.rect.top, width: b.rect.width, height: b.rect.height } : null;
-    return runInsert(doc, { rect, art: b ? (b.tr.img.currentSrc || b.tr.img.src || "") : "", look }, this.settings.insertTarget);
+    // the game's cover art: the picture already on screen, else the art Steam has for the game (custom art first)
+    const cands: string[] = [];
+    if (b) { const s = b.tr.img.currentSrc || b.tr.img.src; if (s) cands.push(s); }
+    if (lookKey && this.prov.artUrls) { try { this.prov.artUrls(lookKey).forEach((u) => { if (u && cands.indexOf(u) < 0) cands.push(u); }); } catch (e) { /* ignore */ } }
+    const d: Document = doc;
+    const go = (art: string) => { try { runInsert(d, { rect, art, look }, this.settings.insertTarget, this.settings.insertSound); } catch (e) { this.noteError(e); } };
+    if (!cands.length || b) { go(cands[0] || ""); return true; }
+    // load the art first (at most ~0.6 s), so the case and the disc are never blank
+    const view = d.defaultView as any;
+    let settled = false;
+    const finish = (u: string) => { if (settled) return; settled = true; go(u); };
+    setTimeout(() => finish(""), 600);
+    const tryAt = (i: number) => {
+      if (settled || i >= cands.length) return;
+      const im = new view.Image();
+      im.onload = () => { if (im.naturalWidth > 10) finish(cands[i]); else tryAt(i + 1); };
+      im.onerror = () => tryAt(i + 1);
+      im.src = cands[i];
+    };
+    tryAt(0);
+    return true;
   }
 
   // cheap: compares window identities and the screen address only; the page is scanned once per new window
