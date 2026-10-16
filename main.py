@@ -22,7 +22,12 @@ CDP_PORT = int(os.environ.get("SANSO_CDP_PORT", "8080"))
 REPORT_PREFIX = "3d-game-cases-report-"
 KEEP_REPORTS = 5
 MAX_REPORT = 2 * 1024 * 1024
-ALLOWED_CALLS = ("update", "setData", "playInsert", "refresh", "selfCheck", "report", "snapshot", "errors")
+ALLOWED_CALLS = ("update", "setData", "playInsert", "refresh", "selfCheck", "report", "snapshot", "errors", "setTemplates")
+TEMPLATE_DIR_NAME = "templates"
+TEMPLATE_MIME = {".png": "image/png", ".webp": "image/webp", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
+TEMPLATE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ ()+-]{0,79}$")
+MAX_TEMPLATE_BYTES = 2 * 1024 * 1024
+MAX_TEMPLATES = 40
 
 
 # ---------- pure helpers (unit-tested without Decky) ----------
@@ -56,6 +61,52 @@ def write_report(folder: str, text: str, now: Optional[float] = None) -> str:
     os.replace(tmp, path)
     prune_reports(folder)
     return path
+
+
+def list_template_files(folder: str) -> List[str]:
+    """Picture files in the templates folder that the plugin will accept (right name, type and size), sorted."""
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return []
+    out = []
+    for n in sorted(names, key=str.lower):
+        ext = os.path.splitext(n)[1].lower()
+        if ext not in TEMPLATE_MIME or not TEMPLATE_NAME_RE.match(n):
+            continue
+        path = os.path.join(folder, n)
+        try:
+            if os.path.isfile(path) and 0 < os.path.getsize(path) <= MAX_TEMPLATE_BYTES:
+                out.append(n)
+        except OSError:
+            continue
+    return out[:MAX_TEMPLATES]
+
+
+def read_template(folder: str, name: str) -> Optional[Dict[str, Any]]:
+    """One template as {name, url (data address), win}. `win` comes from an optional <picture name>.json next to it:
+    {"window": [left, top, right, bottom]} as fractions (0.05 = 5%) of the frame that are NOT the window."""
+    if not isinstance(name, str) or name not in list_template_files(folder):
+        return None
+    ext = os.path.splitext(name)[1].lower()
+    try:
+        with open(os.path.join(folder, name), "rb") as f:
+            raw = f.read(MAX_TEMPLATE_BYTES + 1)
+    except OSError:
+        return None
+    if len(raw) > MAX_TEMPLATE_BYTES:
+        return None
+    win = None
+    try:
+        side = os.path.join(folder, os.path.splitext(name)[0] + ".json")
+        if os.path.isfile(side) and os.path.getsize(side) < 4096:
+            with open(side, "r", encoding="utf-8") as f:
+                w = json.load(f).get("window")
+            if isinstance(w, list) and len(w) == 4 and all(isinstance(v, (int, float)) and 0 <= v < 0.6 for v in w):
+                win = [float(v) for v in w]
+    except (OSError, ValueError, AttributeError):
+        win = None
+    return {"name": name, "url": "data:%s;base64,%s" % (TEMPLATE_MIME[ext], base64.b64encode(raw).decode("ascii")), "win": win}
 
 
 def pick_library_targets(tabs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -181,11 +232,13 @@ class Plugin:
         self.inject_js: Optional[str] = None
         self.fb_settings: Optional[str] = None
         self.fb_data: Optional[str] = None
+        self.fb_templates: Optional[str] = None
+        self.template_dir = os.path.join(self.settings_dir, TEMPLATE_DIR_NAME)
         self.fb_task: Optional[asyncio.Task] = None
         self.fb_targets = 0
         self.fb_error = ""
         try:
-            os.makedirs(self.settings_dir, exist_ok=True)
+            os.makedirs(self.template_dir, exist_ok=True)
         except OSError:
             pass
         log.info("Finally 3D Game Cases background part started")
@@ -213,6 +266,21 @@ class Plugin:
             log.error("safe mode file: %s" % e)
             return False
 
+    # ----- template pictures (frames) from a folder -----
+    async def list_templates(self) -> Dict[str, Any]:
+        try:
+            return {"folder": self.template_dir, "names": await asyncio.to_thread(list_template_files, self.template_dir)}
+        except Exception as e:
+            log.error("list_templates: %s" % e)
+            return {"folder": self.template_dir, "names": []}
+
+    async def get_template(self, name: str) -> Optional[Dict[str, Any]]:
+        try:
+            return await asyncio.to_thread(read_template, self.template_dir, name)
+        except Exception as e:
+            log.error("get_template: %s" % e)
+            return None
+
     async def save_report(self, text: str) -> Dict[str, Any]:
         try:
             if not isinstance(text, str) or not text:
@@ -239,6 +307,8 @@ class Plugin:
             await cdp_eval(ws, self._js(), timeout=20.0)
         expr = "window.__sansoCases.start(%s,%s)" % (self.fb_settings or "{}", self.fb_data or "null")
         res = await cdp_eval(ws, expr)
+        if self.fb_templates:
+            await cdp_eval(ws, "window.__sansoCases.setTemplates(%s)" % self.fb_templates, timeout=20.0)
         return res in ("started", "updated")
 
     async def _inject_all(self) -> int:
@@ -304,6 +374,8 @@ class Plugin:
                 self.fb_settings = arg
             if name == "setData":
                 self.fb_data = arg
+            if name == "setTemplates":
+                self.fb_templates = arg
             expr = "window.__sansoCases.%s(%s)" % (name, arg)
             values = []
             for t in pick_library_targets(await fetch_tabs()):

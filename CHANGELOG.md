@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.10.2
+Update from 1.9.0: install the new zip the same way as before. It replaces the old version and keeps all your looks, wears, names and settings.
+
+### Fixed: huge, blocky ghost with a white ring around the focused game on Home
+- Steam's Home draws every cover twice: the real cover inside the tile you move onto (a role=link Focusable), and a blurred glow copy in a box right next to it, outside that tile. Steam's class names are scrambled now, so the plugin no longer recognised the copy and turned it into a case too. On focus that copy was tilted, un-blurred and drawn on top of the real cover.
+- The copy is now recognised by where it sits (same picture, next to the cover, outside Steam's focus target), is never turned into a case, and keeps Steam's own glow. When two copies can't be told apart, both are kept, so the real cover is never dropped.
+- Works whichever of the two Steam creates first, and when Steam re-creates them. On Home the panel now shows about as many "glow/reflection copies left alone" as covers.
+
+### Template frames (new)
+- Use printed console frames instead of plain colours. Put frame pictures (PNG, WebP or JPG, 2:3, for example the SteamGridDB collection "Templates" by MANE0395) in `~/homebrew/settings/3d-game-cases/templates/` and press **Reload templates** (Looks, colours and presets → Colours → Templates).
+- Every picture appears as a look next to the colours and can be set as the default, per collection or per game. The game's own cover art is drawn inside the frame's window and the frame over it, on the resting cover and on the 3D case.
+- The window is found automatically. If one is off, add `<same name>.json` next to the picture, for example `{"window":[0.04,0.11,0.04,0.04]}` (left, top, right, bottom, as fractions of the frame).
+- Nothing is downloaded or included in the plugin; only files you put in that folder are used. Works with the fallback injection too.
+
+### Other
+- The tilt no longer picks up a strong perspective that Steam sets on a parent (it could magnify the case); the plugin sets its own. Very wide items get a slightly smaller tilt.
+- Covers whose tilting item is the cover itself keep their gloss, band and sleeve.
+
 ## 1.9.0
 Update from 1.8.2: install the new zip the same way you installed 1.8.2. It replaces the old version and keeps all your looks, wears, names and settings.
 

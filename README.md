@@ -95,6 +95,10 @@ Make your own looks under *Colours → My colours*: pick a colour, strength, lig
   <img src="docs/images/shapes.png" alt="Case shapes" width="80%">
 </p>
 
+### Template frames
+
+Prefer a printed console frame to a plain colour? Download frame pictures (for example the console templates in the SteamGridDB collection [Templates](https://www.steamgriddb.com/collection/20087) by MANE0395) and put the files in `~/homebrew/settings/3d-game-cases/templates/`. Then open *Looks, colours and presets → Colours → Templates* and press **Reload templates**. Each picture becomes a look you can pick as the default, for a collection or for one game. The game's cover art is shown inside the frame's dark window. If a window is not found right, put a file with the same name and `.json` next to the picture, e.g. `{"window":[0.04,0.11,0.04,0.04]}` (left, top, right, bottom as fractions of the frame). Respect the licence of whoever made the frames; the plugin does not include any.
+
 ### Wear
 
 <p align="center">
