@@ -88,7 +88,123 @@ export function customPalette(c: CustomColor): Pal {
   };
 }
 
+
+// ---------- templates (frame pictures, e.g. the SteamGridDB console templates) ----------
+// A template is a 2:3 picture of a case front (border, logo bar) with a dark, empty window. The game's cover art is shown
+// inside the window and the frame is drawn over it. They come from a folder (see main.py) and are registered here.
+export interface TemplateInfo { id: string; name: string; url: string; win: { l: number; t: number; r: number; b: number }; pal: Pal }
+export interface TemplateIn { name: string; url: string; win?: number[] | null }
+export const TEMPLATES: Record<string, TemplateInfo> = {};
+export const TPL_PREFIX = "tpl:";
+export const TPL_NAME_OK = /^[A-Za-z0-9][A-Za-z0-9._ ()+-]{0,79}$/;
+export function tplId(file: string): string { return TPL_PREFIX + file; }
+export function tplLabel(id: string): string {
+  return id.slice(TPL_PREFIX.length).replace(/\.(png|webp|jpe?g)$/i, "").replace(/[_]+/g, " ").trim() || "Template";
+}
+export function templateIds(): StyleId[] { return Object.keys(TEMPLATES).sort(); }
+const DEFAULT_WIN = { l: 0.03, t: 0.1, r: 0.03, b: 0.03 }; // fractions of the picture that are frame (left, top, right, bottom)
+
+function median(a: number[]): number { const b = a.slice().sort((x, y) => x - y); return b.length ? b[Math.floor(b.length / 2)] : 0; }
+
+/** Finds the empty window of a template and its main colour by looking at the pixels (nothing is sent anywhere). */
+export function analyzeTemplate(img: HTMLImageElement, win?: number[] | null): { win: TemplateInfo["win"]; pal: Pal } {
+  const doc = img.ownerDocument;
+  const W = 120, H = 180;
+  let data: Uint8ClampedArray | null = null;
+  try {
+    const c = doc.createElement("canvas"); c.width = W; c.height = H;
+    const g = c.getContext("2d");
+    if (g) { g.drawImage(img, 0, 0, W, H); data = g.getImageData(0, 0, W, H).data; }
+  } catch (e) { data = null; }
+  const px = (x: number, y: number) => { const i = (Math.min(H - 1, Math.max(0, y)) * W + Math.min(W - 1, Math.max(0, x))) * 4; return data ? [data[i], data[i + 1], data[i + 2], data[i + 3]] : [0, 0, 0, 255]; };
+  const lum = (x: number, y: number) => { const p = px(x, y); return p[3] < 40 ? -100 : 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2]; };
+  let w = { ...DEFAULT_WIN };
+  if (win && win.length === 4 && win.every((v) => typeof v === "number" && isFinite(v) && v >= 0 && v < 0.6)) {
+    w = { l: win[0], t: win[1], r: win[2], b: win[3] };
+  } else if (data) {
+    // walk outward from the middle of the picture until the brightness jumps: that is where the frame starts
+    const cx = W >> 1, cy = (H * 0.55) | 0;
+    const edge = (x0: number, y0: number, dx: number, dy: number, max: number): number => {
+      let prev = lum(x0, y0);
+      for (let i = 1; i < max; i++) {
+        const x = x0 + dx * i, y = y0 + dy * i;
+        const cur = lum(x, y);
+        if (prev < -50 && cur < -50) continue;                     // see-through window: keep going until something solid
+        if ((prev < -50) !== (cur < -50) || Math.abs(cur - prev) > 14) return i;
+        prev = cur;
+      }
+      return max;
+    };
+    const xs = [0.2, 0.35, 0.65, 0.8].map((f) => (W * f) | 0);
+    const ys = [0.4, 0.55, 0.7].map((f) => (H * f) | 0);
+    const top = median(xs.map((x) => cy - edge(x, cy, 0, -1, cy)));
+    const bottom = median(xs.map((x) => cy + edge(x, cy, 0, 1, H - cy)));
+    const left = median(ys.map((y) => cx - edge(cx, y, -1, 0, cx)));
+    const right = median(ys.map((y) => cx + edge(cx, y, 1, 0, W - cx)));
+    const cand = { l: left / W, t: top / H, r: 1 - right / W, b: 1 - bottom / H };
+    const area = (1 - cand.l - cand.r) * (1 - cand.t - cand.b);
+    if (area > 0.4 && area < 0.97 && cand.l < 0.2 && cand.r < 0.2 && cand.t < 0.3 && cand.b < 0.2) {
+      // a frame always has some border on every side; a value of about zero means no edge was found there
+      w = { l: cand.l < 0.008 ? DEFAULT_WIN.l : cand.l, t: cand.t < 0.008 ? DEFAULT_WIN.t : cand.t, r: cand.r < 0.008 ? DEFAULT_WIN.r : cand.r, b: cand.b < 0.008 ? DEFAULT_WIN.b : cand.b };
+    }
+  }
+  // colour of the frame: the border strip beside the window
+  let r = 0, gg = 0, b = 0, n = 0;
+  if (data) for (let y = (H * 0.3) | 0; y < ((H * 0.8) | 0); y += 4) for (const x of [Math.max(0, ((w.l * W) | 0) - 2), Math.min(W - 1, W - ((w.r * W) | 0) + 1)]) { const p = px(x, y); if (p[3] > 100) { r += p[0]; gg += p[1]; b += p[2]; n++; } }
+  const base = n ? [r / n, gg / n, b / n] : [60, 66, 78];
+  const L = 0.299 * base[0] + 0.587 * base[1] + 0.114 * base[2];
+  const mix = (k: number) => `rgb(${base.map((v) => Math.round(Math.max(0, Math.min(255, k >= 0 ? v + (255 - v) * k : v * (1 + k))))).join(",")})`;
+  return { win: w, pal: { a: mix(0.18), b: mix(-0.55), band: "rgba(0,0,0,0)", text: L > 140 ? "#111111" : "#ffffff", line: L > 140 ? "rgba(0,0,0,.2)" : "rgba(255,255,255,.28)" } };
+}
+
+export function registerTemplates(list: { id: string; name: string; url: string; win: TemplateInfo["win"]; pal: Pal }[]): void {
+  Object.keys(TEMPLATES).forEach((k) => delete TEMPLATES[k]);
+  list.forEach((t) => { TEMPLATES[t.id] = t; });
+}
+
+/** Loads template pictures (data addresses) and works out their windows. */
+export function loadTemplates(doc: Document, items: TemplateIn[]): Promise<TemplateInfo[]> {
+  const view = doc.defaultView as any;
+  const one = (it: TemplateIn) => new Promise<TemplateInfo | null>((resolve) => {
+    if (!TPL_NAME_OK.test(it.name) || typeof it.url !== "string" || it.url.indexOf("data:image/") !== 0) { resolve(null); return; }
+    const im: HTMLImageElement = new view.Image();
+    im.onload = () => {
+      try {
+        if (im.naturalWidth < 60 || im.naturalHeight < 60) { resolve(null); return; }
+        const a = analyzeTemplate(im, it.win);
+        resolve({ id: tplId(it.name), name: it.name, url: it.url, win: a.win, pal: a.pal });
+      } catch (e) { resolve(null); }
+    };
+    im.onerror = () => resolve(null);
+    im.src = it.url;
+  });
+  return Promise.all(items.slice(0, 40).map(one)).then((r) => r.filter((x): x is TemplateInfo => !!x));
+}
+
+function tplCss(): string {
+  const ids = Object.keys(TEMPLATES);
+  if (!ids.length) return "";
+  const pc = (v: number) => `${(v * 100).toFixed(2)}%`;
+  const rules = ids.map((id) => {
+    const t = TEMPLATES[id], w = t.win, q = JSON.stringify(id);
+    // the hole in the frame is a hair smaller than the window and the art a hair bigger, so no seam shows between them
+    const e = 0.004, ax = (v: number) => Math.max(0, v - 0.008);
+    const hole = `polygon(evenodd, 0 0, 100% 0, 100% 100%, 0 100%, 0 0, ${pc(w.l + e)} ${pc(w.t + e)}, ${pc(w.l + e)} ${pc(1 - w.b - e)}, ${pc(1 - w.r - e)} ${pc(1 - w.b - e)}, ${pc(1 - w.r - e)} ${pc(w.t + e)}, ${pc(w.l + e)} ${pc(w.t + e)})`;
+    return `[data-sanso-style=${q}] > [data-sanso-tpl] > [data-t="art"] { left: ${pc(ax(w.l))}; top: ${pc(ax(w.t))}; right: ${pc(ax(w.r))}; bottom: ${pc(ax(w.b))}; }
+[data-sanso-style=${q}] > [data-sanso-tpl] > [data-t="frame"] { background-image: url(${JSON.stringify(t.url)}); -webkit-clip-path: ${hole}; clip-path: ${hole}; }`;
+  }).join("\n");
+  return `
+/* template frames: the game's art in the window, the frame picture over it */
+[data-sanso-tpl] { position: absolute; top: 0; right: 0; bottom: 0; left: 0; pointer-events: none; overflow: hidden; border-radius: var(--c3d-r, 2px); transform: translateZ(.8px); }
+[data-sanso-tpl] > div { position: absolute; top: 0; right: 0; bottom: 0; left: 0; background-repeat: no-repeat; background-position: center; }
+[data-sanso-tpl] > [data-t="art"] { background-size: cover; background-color: #0b0c0f; }
+[data-sanso-tpl] > [data-t="frame"] { background-size: 100% 100%; }
+${rules}
+`;
+}
+
 export function paletteFor(s: Settings, id: string): Pal {
+  if (id.indexOf(TPL_PREFIX) === 0) return TEMPLATES[id] ? TEMPLATES[id].pal : PALETTE.black;
   if (id.indexOf("custom:") === 0) {
     const c = s.customs.filter((x) => "custom:" + x.id === id)[0];
     return c ? customPalette(c) : PALETTE.black;
@@ -107,6 +223,7 @@ export function consoleName(s: Settings, id: string): string {
 }
 
 export function styleLabel(s: Settings, id: string): string {
+  if (id.indexOf(TPL_PREFIX) === 0) return tplLabel(id);
   if (NAMEABLE.indexOf(id) >= 0) return `${consoleName(s, id)} ${NAME_SUFFIX[id]}`;
   if (id.indexOf("custom:") === 0) {
     const c = s.customs.filter((x) => "custom:" + x.id === id)[0];
@@ -179,6 +296,7 @@ function fixId(id: any): any { return typeof id === "string" && ID_ALIAS[id] ? I
 function validId(id: any, customs: CustomColor[]): boolean {
   if (typeof id !== "string") return false;
   if (STYLE_IDS.indexOf(id) >= 0) return true;
+  if (id.indexOf(TPL_PREFIX) === 0) return TPL_NAME_OK.test(id.slice(TPL_PREFIX.length)); // the picture may load later
   return id.indexOf("custom:") === 0 && customs.some((c) => "custom:" + c.id === id);
 }
 
@@ -393,6 +511,7 @@ export function buildCss(s: Settings): string {
   const P = "[data-sanso-pop][data-sanso-pop][data-sanso-pop][data-sanso-pop][data-sanso-pop]";
   const ACT = (inner: string, extra: string, st: string, desc: boolean) => `${P}${extra}${st}${inner}` + (desc ? `, .gpfocus ${P}${extra}${inner}, [data-sanso-focus]${FST} ${P}${extra}${inner}` : "");
   const ACTC = (inner: string, st: string, desc: boolean) => `[data-sanso-pop]${st} [data-sanso-case]${inner}, [data-sanso-case][data-sanso-pop]${st}${inner}` + (desc ? `, .gpfocus [data-sanso-case]${inner}, [data-sanso-focus]${FST} [data-sanso-case]${inner}` : "");
+  const ANG = `var(--c3d-ang, ${A}deg)`; // per-cover tilt (wide items get less, see paint)
   const XF = (dx: string, dy: string, ang: string) => `perspective(1600px) translate3d(${dx}, ${dy}, 16px) rotateY(${ang})`;
   const gloss = s.gloss
     ? `linear-gradient(112deg, rgba(255,255,255,.36) 0%, rgba(255,255,255,.10) 15%, rgba(255,255,255,0) 32%, rgba(255,255,255,0) 60%, rgba(255,255,255,.12) 72%, rgba(255,255,255,0) 73.5%),
@@ -428,8 +547,8 @@ export function buildCss(s: Settings): string {
 @keyframes sanso-shine { from { background-position: 160% 0; } to { background-position: -60% 0; } }`
     : `[data-sanso-faces] > [data-f="shine"] { display: none; }`;
   const active = (st: string, desc: boolean) => `
-${ACT("", ":not([data-sanso-own])", st, desc)} { rotate: 0 1 0 ${A}deg; translate: 0 8px 16px; transform-origin: 100% 50% !important; z-index: 12; opacity: 1 !important; }
-${ACT("", "[data-sanso-own]", st, desc)} { transform: ${XF("0px", "8px", A + "deg")}; transform-origin: 100% 50% !important; z-index: 12; opacity: 1 !important; }
+${ACT("", ":not([data-sanso-own])", st, desc)} { rotate: 0 1 0 ${ANG}; translate: 0 8px 16px; transform-origin: 100% 50% !important; z-index: 12; opacity: 1 !important; }
+${ACT("", "[data-sanso-own]", st, desc)} { transform: ${XF("0px", "8px", ANG)}; transform-origin: 100% 50% !important; z-index: 12; opacity: 1 !important; }
 ${ACT("", "", st, desc)}, ${ACT(" *", "", st, desc)}${desc ? `, [data-sanso-focus]${FST}, [data-sanso-focus]${FST} *` : ""} { -webkit-box-reflect: initial !important; }
 ${ACTC('[data-sanso-case="box"]:not([data-sanso-pop])', st, desc)} { box-shadow: none !important; }
 ${ACT("", ":not(img)", st, desc)} { ${popShadow} }
@@ -444,10 +563,10 @@ ${desc ? `/* Steam's outline sits on a bigger item that does not tilt (Home): hi
 [data-sanso-focus]${FST} [class*="FocusRing"] { opacity: 0 !important; }
 [data-sanso-focus]:is(:focus, :focus-within, .gpfocus, .gpfocuswithin) [data-sanso-case] > [data-sanso-faces] > [data-f="front"] { outline: 3px solid rgba(255,255,255,.9); outline-offset: 3px; border-radius: calc(var(--c3d-r, 2px) + 2px); }` : ""}
 ${s.shine ? `${ACTC(' > [data-sanso-faces] > [data-f="shine"]', st, desc)} { animation: sanso-shine 1.1s ease-out .15s 1 both; }` : ""}`;
-  const PICK = (ang: number, z: number, dy: number) => `perspective(1600px) translate3d(0, ${dy}px, ${z}px) rotateY(${ang}deg)`;
+  const PICK = (ang: number, z: number, dy: number) => `perspective(1600px) translate3d(0, ${dy}px, ${z}px) rotateY(${ang === A ? ANG : ang + "deg"})`;
   const pick = s.pickup ? `
 @keyframes sanso-pick { 0% { transform: ${PICK(A, 16, 8)}; } 45% { transform: ${PICK(Math.round(A * 0.35), 70, -4)}; } 100% { transform: ${PICK(A, 16, 8)}; } }
-@keyframes sanso-pick-i { 0% { rotate: 0 1 0 ${A}deg; translate: 0 8px 16px; } 45% { rotate: 0 1 0 ${Math.round(A * 0.35)}deg; translate: 0 -4px 70px; } 100% { rotate: 0 1 0 ${A}deg; translate: 0 8px 16px; } }
+@keyframes sanso-pick-i { 0% { rotate: 0 1 0 ${ANG}; translate: 0 8px 16px; } 45% { rotate: 0 1 0 ${Math.round(A * 0.35)}deg; translate: 0 -4px 70px; } 100% { rotate: 0 1 0 ${ANG}; translate: 0 8px 16px; } }
 ${P}[data-sanso-pick][data-sanso-own] { animation: sanso-pick .42s cubic-bezier(.3,.7,.3,1) both; z-index: 20 !important; }
 ${P}[data-sanso-pick]:not([data-sanso-own]) { animation: sanso-pick-i .42s cubic-bezier(.3,.7,.3,1) both; z-index: 20 !important; }` : "";
   const LEAN = 9;
@@ -463,6 +582,8 @@ ${NB("[data-sanso-cell]:is(.gpfocus, :focus) + [data-sanso-cell]", false)}
 ${NB("[data-sanso-cell]:has(+ [data-sanso-cell]:is(.gpfocus, :focus))", true)}` : "";
   return `
 ${floatKf}
+/* Steam's own perspective on a parent magnifies the tilted case (a strong one made it twice its size and blocky): use ours */
+[data-sanso-stage="big"], [data-sanso-persp] { perspective: 1600px !important; perspective-origin: 50% 50% !important; }
 [data-sanso-stage="small"] { perspective: 1100px !important; perspective-origin: 50% -30% !important; }
 [data-sanso-stage="own"] { perspective: none !important; }
 /* smooth in and out: same hinge and the same 3D setup before, during and after the move */
@@ -472,7 +593,7 @@ ${floatKf}
   filter: none !important; -webkit-filter: none !important; clip-path: none !important; mask: none !important; -webkit-mask: none !important;
   contain: none !important; mix-blend-mode: normal !important; content-visibility: visible !important; will-change: auto !important; backdrop-filter: none !important;
 }
-[data-sanso-pop]::after, [data-sanso-pop]::before { display: none !important; }
+[data-sanso-pop]:not([data-sanso-case="box"])::after, [data-sanso-pop]:not([data-sanso-case="box"])::before { display: none !important; } /* (when the item is the case itself, its own overlays stay) */
 [data-sanso-pop] * { mix-blend-mode: normal !important; }
 [data-sanso-case="box"] { transition: box-shadow ${T}s ${EASE} !important; }
 [data-sanso-case="box"] > img { filter: brightness(.9); transition: filter ${T}s ${EASE}; }
@@ -481,7 +602,7 @@ ${floatKf}
 [data-sanso-case="box"] > img { translate: 0 0 .6px; }
 /* the case sits a hair behind its Steam item, so Steam's outline (drawn by the item) is never covered by the case */
 [data-sanso-case="box"]:not([data-sanso-pop]) { translate: 0 0 -.4px; }
-[data-sanso-pop] > :not([data-sanso-case]):not([data-sanso-link]):not([data-sanso-faces]) { translate: 0 0 1.4px; }
+[data-sanso-pop] > :not([data-sanso-case]):not([data-sanso-link]):not([data-sanso-faces]):not([data-sanso-tpl]):not(img) { translate: 0 0 1.4px; }
 [data-sanso-pop][data-sanso-pstatic] { position: relative !important; }
 [data-sanso-pop]:not(img) { border-radius: calc(var(--c3d-r, 2px) + 1px) !important; }
 [data-sanso-case="box"] { border-radius: var(--c3d-r, 2px); ${idleShadow} }
@@ -537,6 +658,7 @@ ${neighbors}
 ${active(HAS, false)}
 }
 ${pick}
+${tplCss()}
 `;
 }
 
@@ -631,6 +753,8 @@ function untag(el: HTMLElement): void {
   clearVars(el);
   const faces = el.querySelector(":scope > [data-sanso-faces]");
   if (faces) faces.remove();
+  const tl = el.querySelector(":scope > [data-sanso-tpl]");
+  if (tl) tl.remove();
   let e: HTMLElement | null = el;
   for (let i = 0; e && i < 8; i++, e = e.parentElement) {
     if (e.hasAttribute("data-sanso-pop")) {
@@ -647,10 +771,10 @@ function untag(el: HTMLElement): void {
 }
 
 export function clearAll(doc: Document): void {
-  doc.querySelectorAll("[data-sanso-faces]").forEach((el) => el.remove());
-  doc.querySelectorAll("[data-sanso-case],[data-sanso-pop],[data-sanso-link],[data-sanso-focus],[data-sanso-cell],[data-sanso-pick],[data-sanso-stage],[data-sanso-static],[data-sanso-style],[data-sanso-app]").forEach((el) => {
+  doc.querySelectorAll("[data-sanso-faces],[data-sanso-tpl]").forEach((el) => el.remove());
+  doc.querySelectorAll("[data-sanso-case],[data-sanso-pop],[data-sanso-link],[data-sanso-focus],[data-sanso-cell],[data-sanso-pick],[data-sanso-stage],[data-sanso-persp],[data-sanso-static],[data-sanso-style],[data-sanso-app]").forEach((el) => {
     const h = el as HTMLElement;
-    ["data-sanso-case", "data-sanso-stage", "data-sanso-static", "data-sanso-app", "data-sanso-pop", "data-sanso-pstatic", "data-sanso-own", "data-sanso-link", "data-sanso-focus", "data-sanso-cell", "data-sanso-pick"].forEach((a) => h.removeAttribute(a));
+    ["data-sanso-case", "data-sanso-stage", "data-sanso-static", "data-sanso-app", "data-sanso-pop", "data-sanso-pstatic", "data-sanso-own", "data-sanso-link", "data-sanso-focus", "data-sanso-cell", "data-sanso-pick", "data-sanso-persp"].forEach((a) => h.removeAttribute(a));
     clearVars(h);
   });
   const st = doc.getElementById(STYLE_ID);
@@ -702,6 +826,45 @@ export function isDecoy(img: HTMLImageElement, view: Window | null): boolean {
     }
   }
   return false;
+}
+
+// Steam draws a second copy of the same cover inside the same tile (the glow behind it, a reflection). Since Steam started
+// scrambling its class names the names no longer tell them apart, and the copy was tilted and un-blurred too: a huge,
+// blocky ghost around the focused cover. They are found by structure instead: same picture, same tile.
+function coverTwin(img: HTMLImageElement): { twin: HTMLImageElement; common: Element } | null {
+  const src = img.currentSrc || img.src;
+  if (!src) return null;
+  let p: Element | null = img.parentElement;
+  for (let i = 0; p && i < 7; i++, p = p.parentElement) {
+    const list = p.getElementsByTagName("img");
+    if (list.length > 6) return null; // reached a row of games: no twin in this game's own box
+    for (let j = 0; j < list.length; j++) {
+      const o = list[j];
+      if (o !== img && (o.currentSrc || o.src) === src) return { twin: o, common: p };
+    }
+  }
+  return null;
+}
+const FOCUSABLE = /(^|\s)Focusable(\s|$)/;
+// is there a Steam focus target (the thing you actually move onto) between the picture and `anc`?
+function inFocusTarget(el: Element, anc: Element): boolean {
+  for (let e: Element | null = el.parentElement; e && e !== anc; e = e.parentElement) {
+    if (FOCUSABLE.test(typeof (e as HTMLElement).className === "string" ? (e as HTMLElement).className : "") || e.hasAttribute("tabindex")) return true;
+  }
+  return false;
+}
+/** True when `img` is the extra copy of a cover (Steam's glow / reflection), not the cover itself. */
+export function isTwinDecoy(img: HTMLImageElement): boolean {
+  const t = coverTwin(img);
+  if (!t) return false;
+  // Home (Steam Deck client 2026): the real cover sits inside the focus target (a role=link Focusable); the copy is a
+  // sibling box next to it, outside any focus target
+  const fa = inFocusTarget(img, t.common), fb = inFocusTarget(t.twin, t.common);
+  if (fa !== fb) return !fa;
+  // otherwise: the copy that spreads beyond the cover is the glow
+  const wa = img.offsetWidth * img.offsetHeight, wb = t.twin.offsetWidth * t.twin.offsetHeight;
+  if (wa > wb * 1.15) return true;
+  return false; // can't tell them apart: keep both rather than lose the real cover
 }
 
 // what would make the browser draw the case flat (no spine / top)
@@ -923,7 +1086,7 @@ class DocWatch {
     for (const img of batch) {
       this.eng.stats.imagesChecked++;
       const old = this.tracked.get(img);
-      if (!s.enabled || !allowed || !img.isConnected || !isPortraitCover(img) || (!old && isDecoy(img, view))) {
+      if (!s.enabled || !allowed || !img.isConnected || !isPortraitCover(img) || (!old && (isDecoy(img, view) || isTwinDecoy(img)))) {
         if (!old && img.isConnected && isPortraitCover(img)) this.decoys.add(img);
         if (old) { untag(old.target); this.tracked.delete(img); }
         continue;
@@ -932,8 +1095,18 @@ class DocWatch {
         // the same <img> may have been reused for another game (virtual lists): re-read its id
         const r = resolveAppId(img, this.eng.prov);
         if (r.key !== old.appid) { old.appid = r.key; old.how = r.how; if (r.key) old.target.setAttribute("data-sanso-app", r.key); this.paint(old); }
+        else if (old.mode === "box" && old.target.hasAttribute("data-sanso-style")) this.syncTemplate(old, old.target.getAttribute("data-sanso-style") || "");
         continue;
       }
+      // the extra copy of this cover in the same tile: never part of the case, and if it was tagged before the real
+      // cover showed up, it is released again
+      let decoy: HTMLElement | null = null;
+      { const t = coverTwin(img);
+        if (t && isTwinDecoy(t.twin)) {
+          decoy = t.twin;
+          const tt = this.tracked.get(t.twin);
+          if (tt) { untag(tt.target); this.tracked.delete(t.twin); this.decoys.add(t.twin); }
+        } }
       const parent = img.parentElement;
       let mode: "box" | "img" = "img";
       let makeStatic = false;
@@ -953,6 +1126,7 @@ class DocWatch {
           const p: HTMLElement | null = pop.parentElement;
           if (!p || p === body || p === this.doc.documentElement) break;
           if (p.getElementsByTagName("img").length > 4) break;
+          if (decoy && p.contains(decoy)) break; // the glow copy must not tilt with the case
           const cls = typeof p.className === "string" ? p.className : "";
           const focusable = /(^|\s)Focusable(\s|$)|(^|\s)gpfocus/.test(cls);
           const pr = p.getBoundingClientRect();
@@ -1016,6 +1190,7 @@ class DocWatch {
       if (f.own) pop.setAttribute("data-sanso-own", "1");
       { let q: HTMLElement | null = pop; for (let i = 0; q && i < f.clift; i++) q = q.parentElement; if (q && q !== this.doc.body) q.setAttribute("data-sanso-cell", "1"); }
       if (f.flift) { let q: HTMLElement | null = pop; for (let i = 0; q && i < f.flift; i++) q = q.parentElement; if (q) q.setAttribute("data-sanso-focus", "1"); }
+      if (view) { let q: HTMLElement | null = pop.parentElement; for (let i = 0; q && q !== this.doc.body && i < 8; i++, q = q.parentElement) { try { const pe = view.getComputedStyle(q).perspective; if (pe && pe !== "none") q.setAttribute("data-sanso-persp", "1"); } catch (e) { /* ignore */ } } }
       const stage = pop.parentElement;
       if (stage && stage !== this.doc.body && f.own) stage.setAttribute("data-sanso-stage", "own"); // Steam's own perspective there would distort ours
       else if (stage && stage !== this.doc.body) {
@@ -1039,7 +1214,29 @@ class DocWatch {
       setVars(tr.target, lk.pal, lk.style, lk.depthPx, lk.shape.radius, lk.shape.rim, lk.wear); tr.sig = sig;
       if (tr.pop && tr.pop !== tr.target) tr.pop.style.setProperty("--c3d-r", `${lk.shape.radius}px`);
     }
-    if (tr.mode === "box") ensureFaces(this.doc, tr.target, "");
+    if (tr.pop) {
+      // The case hinges on its right edge, so its far edge swings toward you by width x sin(tilt). On a wide item (Home's
+      // big tiles) the full tilt pushes that edge so close to the camera that the whole cover is magnified and smeared.
+      // Keep the swing small compared with the perspective distance.
+      const w = Math.max(tr.w || 0, 1);
+      const max = Math.asin(Math.min(1, (0.12 * 1100) / w)) * 180 / Math.PI;
+      if (s.angle > max) tr.pop.style.setProperty("--c3d-ang", `${max.toFixed(1)}deg`); else tr.pop.style.removeProperty("--c3d-ang");
+    }
+    if (tr.mode === "box") { ensureFaces(this.doc, tr.target, ""); this.syncTemplate(tr, lk.style); }
+  }
+  // a template look: a layer with the game's art in the window and the frame picture over it
+  syncTemplate(tr: Tracked, style: string): void {
+    let layer = tr.target.querySelector(":scope > [data-sanso-tpl]") as HTMLElement | null;
+    if (!(style.indexOf(TPL_PREFIX) === 0 && TEMPLATES[style])) { if (layer) layer.remove(); return; }
+    if (!layer) {
+      layer = this.doc.createElement("div");
+      layer.setAttribute("data-sanso-tpl", "1");
+      ["art", "frame"].forEach((t) => { const c = this.doc.createElement("div"); c.setAttribute("data-t", t); layer!.appendChild(c); });
+      tr.target.appendChild(layer);
+    }
+    const art = layer.firstElementChild as HTMLElement | null;
+    const src = tr.img.currentSrc || tr.img.src;
+    if (art && src && art.getAttribute("data-src") !== src) { art.setAttribute("data-src", src); art.style.backgroundImage = `url(${JSON.stringify(src)})`; }
   }
   prune(): void {
     this.tracked.forEach((_tr, img) => { if (!img.isConnected) this.tracked.delete(img); });
@@ -1361,6 +1558,12 @@ export class Engine {
     this.prov = prov;
     this.owner = (opts && opts.owner) || "plugin";
     this.selfDoc = (opts && opts.selfDoc) || null;
+  }
+
+  /** New or changed template pictures: every cover is restyled. */
+  setTemplates(list: TemplateInfo[]): void {
+    registerTemplates(list);
+    this.watches.forEach((w) => w.restyle());
   }
 
   noteError(e: any): void { this.errors++; this.lastError = String(e && e.message ? e.message : e); }

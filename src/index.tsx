@@ -7,7 +7,7 @@ import { useEffect, useState } from "react";
 import { FaCube } from "react-icons/fa";
 import {
   CheckLine, CustomColor, DEFAULTS, Engine, Provider, SHAPE_IDS, SHAPE_LABELS, Settings, ShapeId, STYLE_IDS, StyleId, WEAR_IDS,
-  WEAR_LABELS, WearId, DEFAULT_NAMES, NAMEABLE, NAME_SUFFIX, guessStyle, loadSettings, normId, paletteFor, saveSettings, styleLabel,
+  WEAR_LABELS, WearId, DEFAULT_NAMES, NAMEABLE, NAME_SUFFIX, TEMPLATES, TemplateIn, guessStyle, loadSettings, loadTemplates, normId, paletteFor, registerTemplates, saveSettings, styleLabel, templateIds,
 } from "./engine";
 
 const PAGE = "/sanso-3d-cases";
@@ -173,7 +173,7 @@ function allGames(): GameInfo[] {
   return out;
 }
 
-const VERSION = "1.9.0";
+const VERSION = "1.10.2";
 const lifeStats = { api: false, events: 0, last: 0, actions: 0 };
 
 // ---------- optional background part (reports, fallback injection, safe-mode file) ----------
@@ -195,6 +195,8 @@ const cSaveReport = callable<[string], any>("save_report");
 const cFbStart = callable<[string, string], any>("fallback_start");
 const cFbCall = callable<[string, string], any>("fallback_call");
 const cFbStop = callable<[], any>("fallback_stop");
+const cListTpl = callable<[], any>("list_templates");
+const cGetTpl = callable<[string], any>("get_template");
 
 // ---------- shared state ----------
 
@@ -251,6 +253,7 @@ async function startFallback(): Promise<void> {
   const r = await be(() => cFbStart(JSON.stringify(current), JSON.stringify(buildData())), 30000);
   if (r && r.ok) {
     fb.active = true; fb.targets = r.targets; fb.error = "";
+    if (tpl.raw.length) void fallbackCall("setTemplates", JSON.stringify(tpl.raw));
     clearInterval(dataTimer);
     dataTimer = setInterval(() => { void fallbackCall("setData", JSON.stringify(buildData())); }, 60000);
   } else {
@@ -266,6 +269,32 @@ async function stopFallback(): Promise<void> {
   fb.active = false; fb.targets = 0;
   if (was) await be(() => cFbStop(), 6000);
   notify();
+}
+
+// ---------- template pictures (frames) from ~/homebrew/settings/3d-game-cases/templates ----------
+const tpl = { folder: "", found: 0, loaded: 0, loading: false, raw: [] as TemplateIn[], error: "" };
+
+async function loadTemplatesNow(): Promise<void> {
+  if (tpl.loading || current.safeMode) return;
+  tpl.loading = true; tpl.error = ""; notify();
+  try {
+    const l = await be(() => cListTpl(), 6000);
+    if (!l) { tpl.error = "the background part is not answering"; return; }
+    tpl.folder = l.folder || ""; tpl.found = (l.names || []).length;
+    const raw: TemplateIn[] = [];
+    for (const name of (l.names || []) as string[]) {
+      const t = await be(() => cGetTpl(name), 10000);
+      if (t && t.url) raw.push({ name: t.name, url: t.url, win: t.win });
+    }
+    const list = await loadTemplates(document, raw);
+    tpl.raw = raw; tpl.loaded = list.length;
+    if (engine) engine.setTemplates(list); else registerTemplates(list);
+    if (fb.active) void fallbackCall("setTemplates", JSON.stringify(raw));
+  } catch (e) {
+    tpl.error = String((e as any) && (e as any).message ? (e as any).message : e);
+  } finally {
+    tpl.loading = false; notify();
+  }
 }
 
 function startEngine() {
@@ -506,6 +535,8 @@ const CSS = `
 
 function Swatch(props: { s: Settings; id: StyleId }) {
   const p = paletteFor(props.s, props.id);
+  const t = TEMPLATES[props.id];
+  if (t) return <div className="c3d-sw" style={{ background: `url(${JSON.stringify(t.url)}) center / cover no-repeat, ${p.b}`, border: "1px solid rgba(255,255,255,.25)" }} />;
   return <div className="c3d-sw" style={{ background: `linear-gradient(90deg, ${p.a}, ${p.b})`, border: "1px solid rgba(255,255,255,.25)" }} />;
 }
 
@@ -523,7 +554,7 @@ type Target = { kind: "game" | "coll" | "default" | "bulk"; id: string; name: st
 
 function Picker(props: { s: Settings; target: Target; onPick: (id: StyleId | null) => void; onWear: (w: WearId | null) => void; onBack: () => void }) {
   const { s, target } = props;
-  const all: StyleId[] = [...STYLE_IDS, ...s.customs.map((c) => "custom:" + c.id)];
+  const all: StyleId[] = [...STYLE_IDS, ...s.customs.map((c) => "custom:" + c.id), ...templateIds()];
   const cur = target.kind === "game" ? s.games[target.id] : target.kind === "coll" ? s.collections[target.id] : target.kind === "default" ? s.color : undefined;
   const curWear = target.kind === "coll" ? s.wears[target.id] : target.kind === "game" ? s.gameWears[target.id] : undefined;
   return (
@@ -722,6 +753,14 @@ function CasesPage() {
             ))}
             <DialogButton style={{ marginTop: 8 }} onClick={() => commit({ ...s, names: {} })}>Reset names</DialogButton>
           </div>
+          <h2>Templates</h2>
+          <div className="c3d-hint">
+            Want a printed console frame instead of a plain colour? Put frame pictures (PNG, WebP or JPG, 2:3, such as the console templates in the SteamGridDB collection "Templates") into the folder below, then press Reload. Each one shows up in the look lists next to the colours; the game's own cover art is placed inside the frame's dark window.
+            <br />Folder: {tpl.folder || "~/homebrew/settings/3d-game-cases/templates"}
+            <br />{tpl.loading ? "Loading..." : tpl.error ? "Problem: " + tpl.error : `${tpl.loaded} loaded${tpl.found > tpl.loaded ? `, ${tpl.found - tpl.loaded} could not be read` : ""}`}
+            <br />If a frame's window is not found right, add a file next to it with the same name and .json, for example <code>{`{"window":[0.04,0.11,0.04,0.04]}`}</code> (left, top, right, bottom, as fractions of the frame).
+          </div>
+          <DialogButton onClick={() => { void loadTemplatesNow(); }}>Reload templates</DialogButton>
           <h2>My colours</h2>
           <div className="c3d-hint">Make your own: pick a colour, how strong it is and how light or dark, and a case shape. Then choose it for a game, collection or as the default.</div>
           {s.customs.map((c) => <CustomEditor key={c.id} s={s} c={c} />)}
@@ -977,6 +1016,7 @@ export default definePlugin(() => {
   if (tripped && !current.safeMode) enterSafe("The plugin did not survive three starts in a row, so it switched itself off.");
   if (!current.safeMode) { startEngine(); scheduleFallbackChecks(); }
   hookLifetime();
+  timers.push(setTimeout(() => { void loadTemplatesNow(); }, 1500));
   routerHook.addRoute(PAGE, CasesPage);
   void be(() => cGetSafe(), 5000).then((fileSafe) => {
     if (fileSafe === true && !current.safeMode) enterSafe("The safe-mode file was found (SAFE_MODE).");

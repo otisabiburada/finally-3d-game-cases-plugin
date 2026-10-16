@@ -1,7 +1,7 @@
 // Fallback entry point: this whole file is bundled into dist/inject.js and pushed into Steam's library page through
 // the debug port by the plugin's Python part, when the plugin cannot reach the library window itself.
 // It runs the same engine inside the page. Game names, collections and playtime are pushed in as plain data.
-import { CheckLine, Engine, Provider, Settings, PlayInfo, normId, sanitize } from "./engine";
+import { CheckLine, Engine, Provider, Settings, PlayInfo, TemplateIn, loadTemplates, normId, registerTemplates, sanitize } from "./engine";
 
 interface PushedData {
   apps: { k: string; n: string; sc?: number; m?: number; l?: number }[];
@@ -53,6 +53,10 @@ const api = {
   },
   update(settings: any): string { current = sanitize(settings); if (engine) engine.update(current); return "ok"; },
   setData(data: PushedData): string { setData(data); if (engine) engine.refreshWear(); return "ok"; },
+  setTemplates(list: TemplateIn[]): string {
+    loadTemplates(document, Array.isArray(list) ? list : []).then((r) => { if (engine) engine.setTemplates(r); else registerTemplates(r); });
+    return "loading";
+  },
   playInsert(key: string | null): boolean { return engine ? engine.playInsert(key) : false; },
   refresh(): string { if (engine) engine.refreshWear(); return "ok"; },
   stop(): string { if (engine) { engine.stop(); engine = null; } return "stopped"; },
