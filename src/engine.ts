@@ -195,7 +195,7 @@ function tplCss(): string {
   }).join("\n");
   return `
 /* template frames: the game's art in the window, the frame picture over it */
-[data-sanso-tpl] { position: absolute; top: 0; right: 0; bottom: 0; left: 0; pointer-events: none; overflow: hidden; border-radius: var(--c3d-r, 2px); transform: translateZ(.8px); }
+[data-sanso-tpl] { position: absolute; top: 0; right: 0; bottom: 0; left: 0; pointer-events: none; overflow: hidden; border-radius: var(--c3d-r, 2px); z-index: 1; transition: transform 0s linear .8s; }
 [data-sanso-tpl] > div { position: absolute; top: 0; right: 0; bottom: 0; left: 0; background-repeat: no-repeat; background-position: center; }
 [data-sanso-tpl] > [data-t="art"] { background-size: cover; background-color: #0b0c0f; }
 [data-sanso-tpl] > [data-t="frame"] { background-size: 100% 100%; }
@@ -264,14 +264,22 @@ export interface Settings {
   speed: "calm" | "normal" | "snappy";   // how fast the case turns in and out
   insertSound: boolean;                  // sounds for the insert animation
   insertWhen: "before" | "after";        // play before Steam's game-logo launch screen, or after it
+  ejectAnim: boolean;                    // the disc comes back out and the case closes when you quit a game
+  lessMotion: "off" | "battery" | "always"; // no drifting, shine or leaning neighbours (always, or only on battery)
   customs: CustomColor[];                // your own colours
   games: Record<string, StyleId>;        // per-game look, key = app id
   collections: Record<string, StyleId>;  // per-collection look, key = collection id
 }
 
+/** The settings the cases are drawn with: "less motion" switches off drifting, shine and leaning neighbours. */
+export function withLessMotion(s: Settings, onBattery: boolean): Settings {
+  const on = s.lessMotion === "always" || (s.lessMotion === "battery" && onBattery);
+  return on ? { ...s, float: false, shine: false, neighbors: false } : s;
+}
+
 export const DEFAULTS: Settings = {
   enabled: true, angle: 32, depth: 24, color: "black", gloss: true, shadow: true, band: true,
-  spineTitle: false, float: true, idleTilt: 0, autoGuess: true, names: {}, shape: "auto", wear: "none", playWear: false, wearSpeed: "normal", insertAnim: false, insertTarget: "auto", wears: {}, gameWears: {}, fallback: "auto", safeMode: false, checkedOnce: false, shine: true, otherScreens: false, sleeve: true, pickup: true, neighbors: true, speed: "normal", insertSound: true, insertWhen: "before",
+  spineTitle: false, float: true, idleTilt: 0, autoGuess: true, names: {}, shape: "auto", wear: "none", playWear: false, wearSpeed: "normal", insertAnim: false, insertTarget: "auto", wears: {}, gameWears: {}, fallback: "auto", safeMode: false, checkedOnce: false, shine: true, otherScreens: false, sleeve: true, pickup: true, neighbors: true, speed: "normal", insertSound: true, insertWhen: "before", ejectAnim: false, lessMotion: "off",
   customs: [], games: {}, collections: {},
 };
 
@@ -368,6 +376,8 @@ export function sanitize(x: any): Settings {
     speed: x.speed === "calm" || x.speed === "snappy" ? x.speed : "normal",
     insertSound: b(x.insertSound, DEFAULTS.insertSound),
     insertWhen: x.insertWhen === "after" ? "after" : "before",
+    ejectAnim: b(x.ejectAnim, DEFAULTS.ejectAnim),
+    lessMotion: x.lessMotion === "battery" || x.lessMotion === "always" ? x.lessMotion : "off",
     customs,
     games: cleanMap(x.games, customs),
     collections: cleanMap(x.collections, customs),
@@ -512,6 +522,8 @@ export function buildCss(s: Settings): string {
   const ACT = (inner: string, extra: string, st: string, desc: boolean) => `${P}${extra}${st}${inner}` + (desc ? `, .gpfocus ${P}${extra}${inner}, [data-sanso-focus]${FST} ${P}${extra}${inner}` : "");
   const ACTC = (inner: string, st: string, desc: boolean) => `[data-sanso-pop]${st} [data-sanso-case]${inner}, [data-sanso-case][data-sanso-pop]${st}${inner}` + (desc ? `, .gpfocus [data-sanso-case]${inner}, [data-sanso-focus]${FST} [data-sanso-case]${inner}` : "");
   const ANG = `var(--c3d-ang, ${A}deg)`; // per-cover tilt (wide items get less, see paint)
+  // the move itself; "transform-style" and the small depth offsets switch back to flat only after the case has turned back
+  const TR = `transform ${T}s ${EASE}, rotate ${T}s ${EASE}, translate ${T}s ${EASE}, scale ${T}s ${EASE}, box-shadow ${T}s ${EASE}, transform-origin ${T}s ${EASE}`;
   const XF = (dx: string, dy: string, ang: string) => `perspective(1600px) translate3d(${dx}, ${dy}, 16px) rotateY(${ang})`;
   const gloss = s.gloss
     ? `linear-gradient(112deg, rgba(255,255,255,.36) 0%, rgba(255,255,255,.10) 15%, rgba(255,255,255,0) 32%, rgba(255,255,255,0) 60%, rgba(255,255,255,.12) 72%, rgba(255,255,255,0) 73.5%),
@@ -547,16 +559,25 @@ export function buildCss(s: Settings): string {
 @keyframes sanso-shine { from { background-position: 160% 0; } to { background-position: -60% 0; } }`
     : `[data-sanso-faces] > [data-f="shine"] { display: none; }`;
   const active = (st: string, desc: boolean) => `
+/* 3D only here: the game you are on gets the 3D setup at once; it keeps it until it has turned back (see the delays below) */
+${ACT("", ":not(img)", st, desc)}, ${ACT(" [data-sanso-link]", "", st, desc)}, ${ACTC('[data-sanso-case="box"]', st, desc)} { transform-style: preserve-3d !important; }
+${ACT("", "", st, desc)} { transition: ${TR}, transform-style 0s linear 0s !important; }
+${ACT(" [data-sanso-link]", "", st, desc)}, ${ACTC('[data-sanso-case="box"]:not([data-sanso-pop])', st, desc)} { transition: box-shadow ${T}s ${EASE}, transform-style 0s linear 0s, translate 0s linear 0s !important; }
+${ACT(" *", "", st, desc)} { mix-blend-mode: normal !important; }
+${ACTC('[data-sanso-case="box"] > img', st, desc)} { translate: 0 0 .6px; transition: filter ${T}s ${EASE}, translate 0s linear 0s; }
+${ACTC('[data-sanso-case="box"]:not([data-sanso-pop])', st, desc)} { translate: 0 0 -.4px; }
+${ACT(' > :not([data-sanso-case]):not([data-sanso-link]):not([data-sanso-faces]):not([data-sanso-tpl]):not(img)', "", st, desc)} { translate: 0 0 1.4px; transition: translate 0s linear 0s; }
+${ACTC('[data-sanso-case="box"]::after', st, desc)} { transform: translateZ(1px); transition: transform 0s linear 0s; }
+${ACTC('[data-sanso-case="box"] > [data-sanso-tpl]', st, desc)} { transform: translateZ(.8px); transition: transform 0s linear 0s; }
 ${ACT("", ":not([data-sanso-own])", st, desc)} { rotate: 0 1 0 ${ANG}; translate: 0 8px 16px; transform-origin: 100% 50% !important; z-index: 12; opacity: 1 !important; }
 ${ACT("", "[data-sanso-own]", st, desc)} { transform: ${XF("0px", "8px", ANG)}; transform-origin: 100% 50% !important; z-index: 12; opacity: 1 !important; }
 ${ACT("", "", st, desc)}, ${ACT(" *", "", st, desc)}${desc ? `, [data-sanso-focus]${FST}, [data-sanso-focus]${FST} *` : ""} { -webkit-box-reflect: initial !important; }
 ${ACTC('[data-sanso-case="box"]:not([data-sanso-pop])', st, desc)} { box-shadow: none !important; }
 ${ACT("", ":not(img)", st, desc)} { ${popShadow} }
-${s.float ? `${ACTC(":not([data-sanso-pop])", st, desc)} { animation: sanso-drift 6s ease-in-out ${(T + 0.05).toFixed(2)}s infinite; }` : ""}
+${s.float ? `${ACTC(":not([data-sanso-pop])", st, desc)} { animation: sanso-drift 6s ease-in-out ${(T + 0.05).toFixed(2)}s 2; }` : ""}
 ${ACTC('[data-sanso-case="box"] > img', st, desc)} { filter: brightness(1); }
 ${ACTC('[data-sanso-case="box"]', st, desc)}, ${ACT(" [data-sanso-link]", "", st, desc)} { opacity: 1 !important; }
 ${ACTC('[data-sanso-case="img"]', st, desc)} { ${imgPop} }
-${ACTC('[data-sanso-case="box"]::before', st, desc)} { display: none !important; }
 ${ACTC(" > [data-sanso-faces]", st, desc)} { display: block; transition-delay: 0s; }
 ${desc ? `/* Steam's outline sits on a bigger item that does not tilt (Home): hide it and draw one on the case instead */
 [data-sanso-focus]${FST} { outline-color: transparent !important; }
@@ -586,23 +607,21 @@ ${floatKf}
 [data-sanso-stage="big"], [data-sanso-persp] { perspective: 1600px !important; perspective-origin: 50% 50% !important; }
 [data-sanso-stage="small"] { perspective: 1100px !important; perspective-origin: 50% -30% !important; }
 [data-sanso-stage="own"] { perspective: none !important; }
-/* smooth in and out: same hinge and the same 3D setup before, during and after the move */
-[data-sanso-pop] { transform-origin: 100% 50% !important; transition: transform ${T}s ${EASE}, rotate ${T}s ${EASE}, translate ${T}s ${EASE}, scale ${T}s ${EASE}, box-shadow ${T}s ${EASE}, transform-origin ${T}s ${EASE} !important; }
+/* Resting covers are flat (no 3D, no extra GPU layers): the case look is plain 2D paint. Only the game you are on is
+   3D, and it stays 3D until it has turned back (the transform-style and depth offsets switch back after ${T}s). */
+[data-sanso-pop] { transform-origin: 100% 50% !important; transition: ${TR}, transform-style 0s linear ${T}s !important; transition-behavior: allow-discrete !important; }
+[data-sanso-link], [data-sanso-case="box"]:not([data-sanso-pop]) { transition: box-shadow ${T}s ${EASE}, transform-style 0s linear ${T}s, translate 0s linear ${T}s !important; transition-behavior: allow-discrete !important; }
 [data-sanso-pop]:not(img), [data-sanso-link], [data-sanso-case="box"] {
-  transform-style: preserve-3d !important; overflow: visible !important;
+  overflow: visible !important;
   filter: none !important; -webkit-filter: none !important; clip-path: none !important; mask: none !important; -webkit-mask: none !important;
   contain: none !important; mix-blend-mode: normal !important; content-visibility: visible !important; will-change: auto !important; backdrop-filter: none !important;
 }
 [data-sanso-pop]:not([data-sanso-case="box"])::after, [data-sanso-pop]:not([data-sanso-case="box"])::before { display: none !important; } /* (when the item is the case itself, its own overlays stay) */
-[data-sanso-pop] * { mix-blend-mode: normal !important; }
-[data-sanso-case="box"] { transition: box-shadow ${T}s ${EASE} !important; }
-[data-sanso-case="box"] > img { filter: brightness(.9); transition: filter ${T}s ${EASE}; }
-/* nothing may lie in the same plane as the cover picture: equal depth makes the GPU flicker (the dark box background
-   showed through part of the cover for a frame). Lift the picture and Steam's badges a hair above their background. */
-[data-sanso-case="box"] > img { translate: 0 0 .6px; }
-/* the case sits a hair behind its Steam item, so Steam's outline (drawn by the item) is never covered by the case */
-[data-sanso-case="box"]:not([data-sanso-pop]) { translate: 0 0 -.4px; }
-[data-sanso-pop] > :not([data-sanso-case]):not([data-sanso-link]):not([data-sanso-faces]):not([data-sanso-tpl]):not(img) { translate: 0 0 1.4px; }
+[data-sanso-case="box"][data-sanso-pop] { transition: ${TR}, transform-style 0s linear ${T}s !important; transition-behavior: allow-discrete !important; }
+[data-sanso-case="box"] > img { filter: brightness(.9); transition: filter ${T}s ${EASE}, translate 0s linear ${T}s; }
+/* In 3D (see the active rules) nothing may lie in the same plane as the cover picture: equal depth makes the GPU flicker.
+   The picture and Steam's badges are lifted a hair, the case sits a hair behind its Steam item. Flat at rest. */
+[data-sanso-pop] > :not([data-sanso-case]):not([data-sanso-link]):not([data-sanso-faces]):not([data-sanso-tpl]):not(img) { transition: translate 0s linear ${T}s; }
 [data-sanso-pop][data-sanso-pstatic] { position: relative !important; }
 [data-sanso-pop]:not(img) { border-radius: calc(var(--c3d-r, 2px) + 1px) !important; }
 [data-sanso-case="box"] { border-radius: var(--c3d-r, 2px); ${idleShadow} }
@@ -610,15 +629,10 @@ ${floatKf}
 [data-sanso-case="box"][data-sanso-static] { position: relative !important; }
 img[data-sanso-case="img"] { border-radius: var(--c3d-r, 2px); ${imgIdle} }
 
-/* resting cover: two flat layers, no extra elements */
-[data-sanso-case="box"]::before {
-  content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: max(4px, calc(var(--c3d-d, ${d}px) * .6)); pointer-events: none;
-  transform-origin: left center; transform: rotateY(90deg);
-  background: linear-gradient(180deg, var(--c3d-band) 0, var(--c3d-band) 5.2%, transparent 5.2%), linear-gradient(90deg, var(--c3d-a), var(--c3d-b));
-}
+/* resting cover: one flat overlay, no extra elements */
 [data-sanso-case="box"]::after {
-  content: ""; position: absolute; top: 0; right: 0; bottom: 0; left: 0; pointer-events: none; transform: translateZ(1px);
-  border-radius: var(--c3d-r, 2px);
+  content: ""; position: absolute; top: 0; right: 0; bottom: 0; left: 0; pointer-events: none; z-index: 1;
+  border-radius: var(--c3d-r, 2px); transition: transform 0s linear ${T}s;
   background:
     var(--c3d-wear, linear-gradient(rgba(0,0,0,0), rgba(0,0,0,0))),
     ${gloss}
@@ -659,6 +673,8 @@ ${active(HAS, false)}
 }
 ${pick}
 ${tplCss()}
+/* a game is running: nothing of ours animates */
+[data-sanso-sleep] [data-sanso-pop], [data-sanso-sleep] [data-sanso-pop] *, [data-sanso-sleep] [data-sanso-case]::after { animation-play-state: paused !important; }
 `;
 }
 
@@ -1002,6 +1018,7 @@ class DocWatch {
     doc.addEventListener("visibilitychange", this.onVis);
   }
   observe(): void {
+    if (this.eng.sleeping) return; // a game is running: Steam's pages are not watched
     if (this.doc.body) this.obs.observe(this.doc.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["src"] });
   }
   onMutations(recs: MutationRecord[]): void {
@@ -1052,6 +1069,7 @@ class DocWatch {
     } finally { this.observe(); }
   }
   schedule(): void {
+    if (this.eng.sleeping) return;
     if (this.timer || this.queue.size === 0 || this.doc.hidden) return;
     this.timer = setTimeout(() => { this.timer = null; this.run(); }, 60);
   }
@@ -1271,6 +1289,11 @@ class DocWatch {
 // The case and the disc (or game card) are printed with the game's own cover art.
 
 export interface InsertSrc { rect: { left: number; top: number; width: number; height: number } | null; art: string; look: Look }
+/** eject: the same scene played backwards (the disc comes out of the slot and back into the case, which closes).
+ *  tear: a sealed game's first launch, the shrink-wrap is ripped off before the case opens. */
+export interface InsertOpts { eject?: boolean; tear?: boolean }
+const TEAR_MS = 700;   // extra time a shrink-wrap tear adds
+const TEAR_AT = 519;   // the timeline is pushed back from here (the case has flown in, the cover is still closed)
 
 function box(doc: Document, css: string): HTMLElement {
   const e = doc.createElement("div");
@@ -1280,7 +1303,7 @@ function box(doc: Document, css: string): HTMLElement {
 
 // Case and disc sounds, made on the spot with Web Audio (no sound files): plastic clicks, the disc lifting,
 // the slide into the slot, the drive spinning up and the final clunk. Times are in ms from the start.
-export function insertSounds(view: Window, card: boolean, volume: number): void {
+export function insertSounds(view: Window, card: boolean, volume: number, mode: "insert" | "eject" = "insert", warp: (ms: number) => number = (ms) => ms): void {
   try {
     const AC: any = (view as any).AudioContext || (view as any).webkitAudioContext;
     if (!AC) return;
@@ -1293,13 +1316,13 @@ export function insertSounds(view: Window, card: boolean, volume: number): void 
     const click = (ms: number, freq: number, len: number, gain: number, q = 2) => {
       const s = ctx.createBufferSource(); s.buffer = noise(len);
       const f = ctx.createBiquadFilter(); f.type = "bandpass"; f.frequency.value = freq; f.Q.value = q;
-      const g = ctx.createGain(); const at = t0 + ms / 1000;
+      const g = ctx.createGain(); const at = t0 + warp(ms) / 1000;
       g.gain.setValueAtTime(0, at); g.gain.linearRampToValueAtTime(gain, at + 0.002); g.gain.exponentialRampToValueAtTime(0.0008, at + len);
       s.connect(f); f.connect(g); g.connect(master); s.start(at); s.stop(at + len + 0.02);
     };
     // low body thump
     const thump = (ms: number, freq: number, len: number, gain: number) => {
-      const o = ctx.createOscillator(); o.type = "sine"; const g = ctx.createGain(); const at = t0 + ms / 1000;
+      const o = ctx.createOscillator(); o.type = "sine"; const g = ctx.createGain(); const at = t0 + warp(ms) / 1000;
       o.frequency.setValueAtTime(freq * 1.6, at); o.frequency.exponentialRampToValueAtTime(freq, at + len * 0.6);
       g.gain.setValueAtTime(0, at); g.gain.linearRampToValueAtTime(gain, at + 0.004); g.gain.exponentialRampToValueAtTime(0.0008, at + len);
       o.connect(g); g.connect(master); o.start(at); o.stop(at + len + 0.02);
@@ -1307,7 +1330,7 @@ export function insertSounds(view: Window, card: boolean, volume: number): void 
     // sliding: noise swept through a filter
     const slide = (ms: number, len: number, f1: number, f2: number, gain: number) => {
       const s = ctx.createBufferSource(); s.buffer = noise(len);
-      const f = ctx.createBiquadFilter(); f.type = "bandpass"; f.Q.value = 1.2; const at = t0 + ms / 1000;
+      const f = ctx.createBiquadFilter(); f.type = "bandpass"; f.Q.value = 1.2; const at = t0 + warp(ms) / 1000;
       f.frequency.setValueAtTime(f1, at); f.frequency.exponentialRampToValueAtTime(f2, at + len);
       const g = ctx.createGain(); g.gain.setValueAtTime(0, at); g.gain.linearRampToValueAtTime(gain, at + len * 0.3); g.gain.exponentialRampToValueAtTime(0.0008, at + len);
       s.connect(f); f.connect(g); g.connect(master); s.start(at); s.stop(at + len + 0.02);
@@ -1315,11 +1338,29 @@ export function insertSounds(view: Window, card: boolean, volume: number): void 
     // drive motor spinning up
     const motor = (ms: number, len: number, gain: number) => {
       const o = ctx.createOscillator(); o.type = "sawtooth"; const lp = ctx.createBiquadFilter(); lp.type = "lowpass"; lp.frequency.value = 900;
-      const g = ctx.createGain(); const at = t0 + ms / 1000;
+      const g = ctx.createGain(); const at = t0 + warp(ms) / 1000;
       o.frequency.setValueAtTime(70, at); o.frequency.exponentialRampToValueAtTime(240, at + len);
       g.gain.setValueAtTime(0, at); g.gain.linearRampToValueAtTime(gain, at + len * 0.35); g.gain.exponentialRampToValueAtTime(0.0008, at + len);
       o.connect(lp); lp.connect(g); g.connect(master); o.start(at); o.stop(at + len + 0.02);
     };
+    if (mode === "eject") {
+      // the reverse: case opens, the drive spins down and pushes the disc out, it drops into the tray, the case shuts
+      const spinDown = (ms: number, len: number, gain: number) => {
+        const o = ctx.createOscillator(); o.type = "sawtooth"; const lp = ctx.createBiquadFilter(); lp.type = "lowpass"; lp.frequency.value = 900;
+        const g = ctx.createGain(); const at = t0 + warp(ms) / 1000;
+        o.frequency.setValueAtTime(240, at); o.frequency.exponentialRampToValueAtTime(60, at + len);
+        g.gain.setValueAtTime(0, at); g.gain.linearRampToValueAtTime(gain, at + 0.05); g.gain.exponentialRampToValueAtTime(0.0008, at + len);
+        o.connect(lp); lp.connect(g); g.connect(master); o.start(at); o.stop(at + len + 0.02);
+      };
+      click(330, 3200, 0.03, 0.5); thump(350, 140, 0.08, 0.22);
+      if (!card) spinDown(420, 0.45, 0.05);
+      click(600, 2200, 0.04, 0.45, 3); thump(610, 110, 0.1, 0.4);
+      slide(620, 0.3, 2600, 900, card ? 0.35 : 0.28);
+      if (card) { click(1300, 4200, 0.025, 0.4); } else { click(1290, 3600, 0.03, 0.3); click(1310, 5200, 0.02, 0.35); }
+      click(1820, 2800, 0.035, 0.55); thump(1840, 160, 0.08, 0.3);
+      view.setTimeout(() => { try { ctx.close(); } catch (e) { /* ignore */ } }, 3200);
+      return;
+    }
     // case: hinge unlatches, cover opens and taps open
     click(380, 3200, 0.03, 0.55); thump(400, 140, 0.08, 0.25);
     click(880, 2400, 0.04, 0.35);
@@ -1331,16 +1372,31 @@ export function insertSounds(view: Window, card: boolean, volume: number): void 
     else { thump(1585, 95, 0.14, 0.5); click(1580, 2200, 0.04, 0.45, 3); motor(1600, 0.55, 0.06); }
     // case snaps shut
     click(1850, 2800, 0.035, 0.5); thump(1855, 160, 0.07, 0.25);
+    // a sealed game: the shrink-wrap crinkles and rips first. The rest of the timeline is pushed back for it, so these
+    // use real time (the tear runs from 540 to about 1150 ms).
+    if (warp(519) !== 519) {
+      const burst = (ms: number, len: number, freq: number, gain: number, kind: BiquadFilterType) => {
+        const b = ctx.createBufferSource(); b.buffer = noise(len);
+        const f = ctx.createBiquadFilter(); f.type = kind; f.frequency.value = freq; f.Q.value = 3;
+        const g = ctx.createGain(); const at = t0 + ms / 1000;
+        g.gain.setValueAtTime(0, at); g.gain.linearRampToValueAtTime(gain, at + 0.004); g.gain.exponentialRampToValueAtTime(0.0008, at + len);
+        b.connect(f); f.connect(g); g.connect(master); b.start(at); b.stop(at + len + 0.02);
+      };
+      for (let k = 0; k < 7; k++) burst(540 + k * 34 + Math.random() * 18, 0.014, 5200 + Math.random() * 2600, 0.2, "bandpass"); // crinkle as it is gripped
+      burst(800, 0.28, 2600, 0.38, "highpass");                                                                                  // the rip
+      for (let k = 0; k < 5; k++) burst(900 + k * 45 + Math.random() * 20, 0.012, 6000 + Math.random() * 2000, 0.14, "bandpass"); // the pieces fly off
+    }
     view.setTimeout(() => { try { ctx.close(); } catch (e) { /* ignore */ } }, 3200);
   } catch (e) { /* no sound is fine */ }
 }
 
-export function runInsert(doc: Document, src: InsertSrc, target: "auto" | "handheld" | "console", sound = true): boolean {
+export function runInsert(doc: Document, src: InsertSrc, target: "auto" | "handheld" | "console", sound = true, opts: InsertOpts = {}): boolean {
   const view = doc.defaultView;
   if (!view || !doc.body || typeof (doc.body as any).animate !== "function") return false;
   const old = doc.getElementById("sanso-insert");
   if (old) old.remove(); // a newer launch replaces one still playing
   const W = view.innerWidth, H = view.innerHeight;
+  if (W < 200 || H < 200) return false; // the window is not laid out yet (e.g. Steam coming back after a game): try again later
   const variant = target === "auto" ? (W >= 1800 ? "console" : "handheld") : target;
   const L = src.look, pal = L.pal;
   const art = src.art ? `url(${JSON.stringify(src.art)})` : `linear-gradient(160deg, ${pal.a}, ${pal.b})`;
@@ -1459,8 +1515,11 @@ export function runInsert(doc: Document, src: InsertSrc, target: "auto" | "handh
   const fx: Animation[] = [];
   const A = (el: HTMLElement, kf: Keyframe[], o: KeyframeAnimationOptions) => { fx.push(el.animate(kf, { fill: "both", ...o })); };
   // fly in 0-420, open 380-900, disc shows 780, lifts 880-1060, travels 1060-1560, close 1520-1860, fade out to 2100
-  const T_END = 2200;
-  const at = (ms: number) => Math.min(1, Math.max(0, ms / T_END));
+  const eject = !!opts.eject, tearing = !!opts.tear && !eject;
+  const TEAR = tearing ? TEAR_MS : 0;
+  const warp = (ms: number) => (ms < TEAR_AT ? ms : ms + TEAR);
+  const T_END = 2200 + TEAR;
+  const at = (ms: number) => Math.min(1, Math.max(0, warp(ms) / T_END));
   A(shade, [{ opacity: 0 }, { opacity: 1, offset: at(200) }, { opacity: 1, offset: at(1880) }, { opacity: 0 }], { duration: T_END, easing: "ease-in-out" });
   // seated copy hands over to the flying one at the same spot
   A(seat, [{ opacity: 1 }, { opacity: 1, offset: at(880) }, { opacity: 0, offset: at(881) }, { opacity: 0 }], { duration: T_END, easing: "linear" });
@@ -1489,7 +1548,7 @@ export function runInsert(doc: Document, src: InsertSrc, target: "auto" | "handh
   // the cover swings open, overshoots the hinge stop a touch and settles; later it snaps shut
   A(cover, [
     { transform: "rotateY(0deg)" },
-    { transform: "rotateY(0deg)", offset: at(380), easing: "cubic-bezier(.5,0,.3,1)" },
+    { transform: "rotateY(0deg)", offset: at(tearing ? 520 : 380), easing: "cubic-bezier(.5,0,.3,1)" },
     { transform: "rotateY(-168deg)", offset: at(860), easing: "ease-in-out" },
     { transform: "rotateY(-157deg)", offset: at(960), easing: "ease-in-out" },
     { transform: "rotateY(-160deg)", offset: at(1040) },
@@ -1536,7 +1595,36 @@ export function runInsert(doc: Document, src: InsertSrc, target: "auto" | "handh
     { opacity: 1, transform: "scale(1)", boxShadow: "0 0 0 1px rgba(170,225,255,.6), 0 0 14px 3px rgba(80,170,255,.4)", offset: at(1800) },
     { opacity: 0, transform: "scale(1)" },
   ], { duration: T_END, easing: "ease-out" });
-  if (sound) insertSounds(view, card, 0.85);
+  if (tearing) {
+    // the shrink-wrap: a glossy film with the seal sticker, in two pieces that are torn apart and fly off
+    const film = `linear-gradient(115deg, rgba(255,255,255,.30) 0 7%, transparent 7% 30%, rgba(255,255,255,.18) 30% 33%, transparent 33%), radial-gradient(circle at 86% 91%, #ffd44d 0 4.5%, #b98a12 4.5% 6%, transparent 6.2%), repeating-linear-gradient(0deg, rgba(255,255,255,.07) 0 1px, transparent 1px 5px), linear-gradient(rgba(255,255,255,.10), rgba(255,255,255,.05))`;
+    const edge = ["52% 0", "47% 12%", "54% 25%", "46% 38%", "55% 52%", "47% 66%", "53% 80%", "48% 92%", "52% 100%"];
+    const left = `polygon(0 0, ${edge.join(", ")}, 0 100%)`;
+    const right = `polygon(100% 0, ${edge.join(", ")}, 100% 100%)`;
+    const wrapL = box(doc, `inset:-1px;border-radius:${rad}px;background:${film};clip-path:${left};-webkit-clip-path:${left};transform:translateZ(1.2px);backface-visibility:hidden;`);
+    const wrapR = box(doc, `inset:-1px;border-radius:${rad}px;background:${film};clip-path:${right};-webkit-clip-path:${right};transform:translateZ(1.2px);backface-visibility:hidden;`);
+    cover.appendChild(wrapL); cover.appendChild(wrapR);
+    const r = (ms: number) => Math.min(1, ms / T_END); // real time (the tear itself is not pushed back)
+    A(wrapL, [
+      { transform: "translateZ(1.2px)", opacity: 1 },
+      { transform: "translateZ(1.2px)", opacity: 1, offset: r(540) },
+      { transform: "translateZ(1.2px) translate(-2px,1px) rotate(-1deg)", opacity: 1, offset: r(700) },      // gripped, crinkles
+      { transform: "translateZ(1.2px) translate(1px,-1px) rotate(.5deg)", opacity: 1, offset: r(790), easing: "cubic-bezier(.3,0,.6,1)" },
+      { transform: `translateZ(40px) translate(${-Math.round(cw * 0.75)}px,${Math.round(ch * 0.18)}px) rotate(-24deg) rotateY(-35deg)`, opacity: 0, offset: r(1150) },
+      { transform: `translateZ(40px) translate(${-Math.round(cw * 0.75)}px,${Math.round(ch * 0.18)}px) rotate(-24deg) rotateY(-35deg)`, opacity: 0 },
+    ], { duration: T_END });
+    A(wrapR, [
+      { transform: "translateZ(1.2px)", opacity: 1 },
+      { transform: "translateZ(1.2px)", opacity: 1, offset: r(540) },
+      { transform: "translateZ(1.2px) translate(2px,-1px) rotate(1deg)", opacity: 1, offset: r(700) },
+      { transform: "translateZ(1.2px) translate(-1px,1px) rotate(-.5deg)", opacity: 1, offset: r(800), easing: "cubic-bezier(.3,0,.6,1)" },
+      { transform: `translateZ(60px) translate(${Math.round(cw * 0.9)}px,${-Math.round(ch * 0.28)}px) rotate(30deg) rotateY(40deg)`, opacity: 0, offset: r(1120) },
+      { transform: `translateZ(60px) translate(${Math.round(cw * 0.9)}px,${-Math.round(ch * 0.28)}px) rotate(30deg) rotateY(40deg)`, opacity: 0 },
+    ], { duration: T_END });
+  }
+  // eject: everything runs backwards, from the slot back into the case and back to the cover's place
+  if (eject) fx.forEach((a) => { try { a.reverse(); } catch (e) { /* ignore */ } });
+  if (sound) insertSounds(view, card, 0.85, eject ? "eject" : "insert", warp);
   const done = () => { fx.forEach((a) => { try { a.cancel(); } catch (e) { /* ignore */ } }); try { if (root.isConnected) root.remove(); } catch (e) { /* ignore */ } };
   setTimeout(done, T_END + 80);
   return true;
@@ -1558,6 +1646,22 @@ export class Engine {
     this.prov = prov;
     this.owner = (opts && opts.owner) || "plugin";
     this.selfDoc = (opts && opts.selfDoc) || null;
+  }
+
+  /** While a game runs the plugin does nothing at all: no page watching, no timers, no animations.
+   *  On waking up it catches up with one scan of each window. */
+  sleeping = false;
+  setSleeping(on: boolean): void {
+    if (on === this.sleeping) return;
+    this.sleeping = on;
+    this.watches.forEach((w) => {
+      try {
+        if (on) { w.obs.disconnect(); clearTimeout(w.timer); w.timer = null; w.doc.documentElement.setAttribute("data-sanso-sleep", "1"); }
+        else { w.doc.documentElement.removeAttribute("data-sanso-sleep"); w.observe(); w.scanAll(); }
+      } catch (e) { this.noteError(e); }
+    });
+    if (on) { if (this.findTimer) clearInterval(this.findTimer); this.findTimer = null; }
+    else if (!this.findTimer && this.settings.enabled) { this.discover(); this.findTimer = setInterval(() => this.discover(), DISCOVER_MS); }
   }
 
   /** New or changed template pictures: every cover is restyled. */
@@ -1735,7 +1839,11 @@ export class Engine {
   /** Play the insert animation for a game (key = unsigned app id) or, with null, for any visible cover. */
   private lastInsert = { key: "", t: 0 };
   /** Play the insert animation for a game (key = unsigned app id). With null: the game page you are on, or any visible cover. */
-  playInsert(key: string | null): boolean {
+  /** Called when a sealed game's wrap was torn off (its own "Sealed" wear can then be removed). */
+  onTear: ((key: string) => void) | null = null;
+
+  playInsert(key: string | null, opts: { eject?: boolean } = {}): boolean {
+    const eject = !!opts.eject;
     // Steam's windows: the watched ones, or (3D cases switched off) straight from Steam, so the animation works on its own
     let docs: Document[] = Array.from(this.watches.keys());
     if (!docs.length) { try { docs = this.prov.getDocs().filter((x) => !!x && !!x.body); } catch (e) { docs = []; } }
@@ -1747,25 +1855,46 @@ export class Engine {
         if (m && !dd.hidden && !pageDoc) { key = normId(m[1]) || null; pageDoc = dd; }
       });
     }
-    if (key !== null) {
+    if (key !== null && !eject) {
       const now = Date.now();
       if (this.lastInsert.key === key && now - this.lastInsert.t < 8000) return false; // launch reported twice
       this.lastInsert = { key, t: now };
     }
-    let best: { w: DocWatch; tr: Tracked; rect: DOMRect } | null = null;
+    // the game's cover on screen: the case starts there and its picture is the art
+    const onScreen = (im: HTMLImageElement, dd: Document): DOMRect | null => {
+      let rect: DOMRect | null = null;
+      try { rect = im.getBoundingClientRect(); } catch (e) { rect = null; }
+      const vh = dd.defaultView ? dd.defaultView.innerHeight : 0;
+      return rect && rect.width > 20 && rect.height > 20 && rect.bottom > 0 && rect.top < vh ? rect : null;
+    };
+    let hit: { doc: Document; img: HTMLImageElement; rect: DOMRect; key: string | null } | null = null;
     this.watches.forEach((w) => {
       if (w.doc.hidden) return;
       w.tracked.forEach((tr) => {
-        if (best || !tr.img.isConnected || (key !== null && tr.appid !== key)) return;
-        let rect: DOMRect | null = null;
-        try { rect = tr.img.getBoundingClientRect(); } catch (e) { rect = null; }
-        const vh = w.doc.defaultView ? w.doc.defaultView.innerHeight : 0;
-        if (rect && rect.width > 20 && rect.height > 20 && rect.bottom > 0 && rect.top < vh) best = { w, tr, rect };
+        if (hit || !tr.img.isConnected || (key !== null && tr.appid !== key)) return;
+        const rect = onScreen(tr.img, w.doc);
+        if (rect) hit = { doc: w.doc, img: tr.img, rect, key: tr.appid };
       });
     });
-    const b: any = best;
-    const lookKey = key !== null ? key : b ? b.tr.appid : null;
-    let doc: Document | null = b ? b.w.doc : pageDoc;
+    if (!hit) {
+      // 3D cases switched off (nothing is tagged) or this cover is not tagged: look for it on the page directly
+      for (const dd of docs) {
+        if (hit || dd.hidden) continue;
+        const imgs = dd.getElementsByTagName("img");
+        for (let i = 0; i < imgs.length && i < 600; i++) {
+          const im = imgs[i] as HTMLImageElement;
+          if (!isPortraitCover(im)) continue;
+          const r = resolveAppId(im, this.prov);
+          if (key !== null ? r.key !== key : !r.key) continue;
+          if (isDecoy(im, dd.defaultView) || isTwinDecoy(im)) continue;
+          const rect = onScreen(im, dd);
+          if (rect) { hit = { doc: dd, img: im, rect, key: r.key }; break; }
+        }
+      }
+    }
+    const b: any = hit;
+    const lookKey = key !== null ? key : b ? b.key : null;
+    let doc: Document | null = b ? b.doc : pageDoc;
     if (!doc) {
       // not on screen (game page, Home...): the biggest visible Steam window
       let most = -1;
@@ -1779,30 +1908,57 @@ export class Engine {
     const rect = b ? { left: b.rect.left, top: b.rect.top, width: b.rect.width, height: b.rect.height } : null;
     // the game's cover art: the picture already on screen, else the art Steam has for the game (custom art first)
     const cands: string[] = [];
-    if (b) { const s = b.tr.img.currentSrc || b.tr.img.src; if (s) cands.push(s); }
-    if (lookKey && this.prov.artUrls) { try { this.prov.artUrls(lookKey).forEach((u) => { if (u && cands.indexOf(u) < 0) cands.push(u); }); } catch (e) { /* ignore */ } }
+    const add = (u: string) => { if (u && cands.indexOf(u) < 0) cands.push(u); };
+    if (b) add(b.img.currentSrc || b.img.src);
+    if (lookKey && this.prov.artUrls) { try { this.prov.artUrls(lookKey).forEach(add); } catch (e) { /* ignore */ } }
+    // where Steam keeps a game's portrait art (custom art first): used when the calls above give nothing usable
+    if (lookKey && /^\d+$/.test(lookKey)) {
+      ["png", "jpg", "webp"].forEach((x) => add(`/customimages/${lookKey}p.${x}`));
+      add(`/assets/${lookKey}/library_600x900.jpg`);
+      add(`/assets/${lookKey}/library_600x900_2x.jpg`);
+    }
     const d: Document = doc;
-    const go = (art: string) => { try { runInsert(d, { rect, art, look }, this.settings.insertTarget, this.settings.insertSound); } catch (e) { this.noteError(e); } };
-    if (!cands.length || b) { go(cands[0] || ""); return true; }
-    // load the art first (at most ~0.6 s), so the case and the disc are never blank
-    const view = d.defaultView as any;
-    let settled = false;
-    const finish = (u: string) => { if (settled) return; settled = true; go(u); };
-    setTimeout(() => finish(""), 600);
-    const tryAt = (i: number) => {
-      if (settled || i >= cands.length) return;
-      const im = new view.Image();
-      im.onload = () => { if (im.naturalWidth > 10) finish(cands[i]); else tryAt(i + 1); };
-      im.onerror = () => tryAt(i + 1);
-      im.src = cands[i];
+    // first launch of a sealed game: the wrap is torn off. "First" = never played, or the game itself is set to Sealed.
+    let tear = false;
+    if (!eject && lookKey && look.wear === "sealed") {
+      let info: PlayInfo | null = null;
+      try { info = this.prov.playInfo(lookKey); } catch (e) { info = null; }
+      tear = this.settings.gameWears[lookKey] === "sealed" || (!!info && info.minutes <= 0 && !info.last);
+    }
+    const go = (art: string): boolean => {
+      try {
+        const ok = runInsert(d, { rect, art, look }, this.settings.insertTarget, this.settings.insertSound, { eject, tear });
+        if (ok && tear && lookKey && this.onTear) this.onTear(lookKey);
+        return ok;
+      } catch (e) { this.noteError(e); return false; }
     };
-    tryAt(0);
+    if (!cands.length || b) return go(cands[0] || "");
+    // load the art first, all candidates at once, and take the best one that loads (at most ~1.5 s), so the case and
+    // the disc are never blank. Relative addresses are Steam's own (steamloopback.host), as in its own pages.
+    const view = d.defaultView as any;
+    const done: boolean[] = [], good: boolean[] = [];
+    let settled = false;
+    const decide = (force: boolean) => {
+      if (settled) return;
+      for (let i = 0; i < cands.length; i++) {
+        if (good[i]) { settled = true; go(cands[i]); return; }
+        if (!done[i] && !force) return; // a better one may still come
+      }
+      if (force || done.filter(Boolean).length === cands.length) { settled = true; go(""); }
+    };
+    cands.forEach((u, i) => {
+      const im = new view.Image();
+      im.onload = () => { done[i] = true; good[i] = im.naturalWidth > 10 && im.naturalHeight > im.naturalWidth; decide(false); };
+      im.onerror = () => { done[i] = true; decide(false); };
+      im.src = u;
+    });
+    setTimeout(() => decide(true), 1500);
     return true;
   }
 
   // cheap: compares window identities and the screen address only; the page is scanned once per new window
   private discover(): void {
-    if (!this.settings.enabled) return;
+    if (!this.settings.enabled || this.sleeping) return;
     let docs: Document[] = [];
     try { docs = this.prov.getDocs(); } catch (e) { docs = []; }
     this.watches.forEach((w, doc) => {

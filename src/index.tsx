@@ -7,8 +7,9 @@ import { useEffect, useState } from "react";
 import { FaCube } from "react-icons/fa";
 import {
   CheckLine, CustomColor, DEFAULTS, Engine, Provider, SHAPE_IDS, SHAPE_LABELS, Settings, ShapeId, STYLE_IDS, StyleId, WEAR_IDS,
-  WEAR_LABELS, WearId, DEFAULT_NAMES, NAMEABLE, NAME_SUFFIX, TEMPLATES, TemplateIn, guessStyle, loadSettings, loadTemplates, normId, paletteFor, registerTemplates, saveSettings, styleLabel, templateIds,
+  WEAR_LABELS, WearId, DEFAULT_NAMES, NAMEABLE, NAME_SUFFIX, TEMPLATES, TemplateIn, guessStyle, loadSettings, withLessMotion, loadTemplates, normId, paletteFor, registerTemplates, saveSettings, styleLabel, templateIds,
 } from "./engine";
+import { LaunchGate } from "./launch";
 
 const PAGE = "/sanso-3d-cases";
 
@@ -173,7 +174,7 @@ function allGames(): GameInfo[] {
   return out;
 }
 
-const VERSION = "1.10.2";
+const VERSION = "1.11.1";
 const lifeStats = { api: false, events: 0, last: 0, actions: 0 };
 
 // ---------- optional background part (reports, fallback injection, safe-mode file) ----------
@@ -215,10 +216,45 @@ const REASON_KEY = "sanso-3d-safe-reason";
 
 function notify() { listeners.forEach((f) => f()); }
 
+// "Less motion" on battery: Steam's battery state (and the browser's, as a backup) says whether the charger is in
+let onBattery = false;
+let batteryHandle: any = null;
+function forEngine(s: Settings): Settings { return withLessMotion(s, onBattery); }
+function setOnBattery(v: boolean): void {
+  if (v === onBattery) return;
+  onBattery = v;
+  if (current.lessMotion !== "battery") return;
+  if (engine) engine.update(forEngine(current));
+  if (fb.active) schedulePush();
+  notify();
+}
+function watchBattery(): void {
+  try {
+    const sc: any = (window as any).SteamClient;
+    const reg = sc && sc.System && sc.System.RegisterForBatteryStateChanges;
+    if (reg) {
+      // eACState: 1 = not plugged in, 2 = charging, 3 = plugged in (slow charger); no battery = always plugged in
+      batteryHandle = reg.call(sc.System, (st: any) => {
+        try { if (st && typeof st.eACState === "number") setOnBattery(!!st.bHasBattery && st.eACState === 1); } catch (e) { /* ignore */ }
+      });
+      return;
+    }
+  } catch (e) { /* not available */ }
+  try {
+    const nav: any = navigator;
+    if (nav && typeof nav.getBattery === "function") {
+      nav.getBattery().then((b: any) => {
+        const upd = () => setOnBattery(!b.charging);
+        upd(); b.addEventListener("chargingchange", upd);
+      }).catch(() => { /* ignore */ });
+    }
+  } catch (e) { /* ignore */ }
+}
+
 function commit(next: Settings) {
   current = next;
   saveSettings(next);
-  if (engine) engine.update(next);
+  if (engine) engine.update(forEngine(next));
   if (fb.active) schedulePush();
   notify();
 }
@@ -245,12 +281,12 @@ async function fallbackCall(name: string, arg: string): Promise<any> {
 
 function schedulePush() {
   clearTimeout(pushTimer);
-  pushTimer = setTimeout(() => { void fallbackCall("update", JSON.stringify(current)); }, 400);
+  pushTimer = setTimeout(() => { void fallbackCall("update", JSON.stringify(forEngine(current))); }, 400);
 }
 
 async function startFallback(): Promise<void> {
   if (fb.active || current.safeMode || current.fallback === "off") return;
-  const r = await be(() => cFbStart(JSON.stringify(current), JSON.stringify(buildData())), 30000);
+  const r = await be(() => cFbStart(JSON.stringify(forEngine(current)), JSON.stringify(buildData())), 30000);
   if (r && r.ok) {
     fb.active = true; fb.targets = r.targets; fb.error = "";
     if (tpl.raw.length) void fallbackCall("setTemplates", JSON.stringify(tpl.raw));
@@ -299,8 +335,15 @@ async function loadTemplatesNow(): Promise<void> {
 
 function startEngine() {
   if (engine || current.safeMode || current.fallback === "always") return;
-  engine = new Engine(current, provider, { selfDoc: document });
+  engine = new Engine(forEngine(current), provider, { selfDoc: document });
+  // a sealed game's wrap was torn off on its first launch: its own "Sealed" wear is done
+  engine.onTear = (key: string) => {
+    if (current.gameWears[key] !== "sealed") return;
+    const gw = { ...current.gameWears }; delete gw[key];
+    commit({ ...current, gameWears: gw });
+  };
   engine.start();
+  if (runningGames.size) engine.setSleeping(true);
   errBase = 0;
 }
 function stopEngine() {
@@ -349,7 +392,10 @@ function bootGuard(): boolean {
 let lifeHandle: any = null;
 let actionHandle: any = null;
 let taskHandle: any = null;
-let lastAction = { key: "", t: 0 };
+const gate = new LaunchGate(); // one animation per launch, however often Steam reports it
+// games running right now: while any runs, the plugin sleeps (no page watching, timers or animations)
+const runningGames = new Set<string>();
+function updateSleep(): void { if (engine) engine.setSleeping(runningGames.size > 0); }
 let pending: { key: string; timer: any } | null = null;
 const AFTER_LOGO_MS = 1700; // Steam's logo zooms in and settles in about this time
 function firePending(): void {
@@ -362,10 +408,24 @@ function schedulePending(key: string): void {
   pending = { key, timer: setTimeout(firePending, AFTER_LOGO_MS) };
 }
 
-async function playInsertAny(key: string | null): Promise<void> {
+async function playInsertAny(key: string | null, eject = false): Promise<boolean> {
   // the game page may hold no covers at all, so do not require tagged covers here
-  if (engine && (engine.libraryReachable() || !fb.active)) engine.playInsert(key);
-  else if (fb.active) await fallbackCall("playInsert", JSON.stringify(key));
+  if (engine && (engine.libraryReachable() || !fb.active)) return engine.playInsert(key, { eject });
+  if (fb.active) { const r = await fallbackCall(eject ? "playEject" : "playInsert", JSON.stringify(key)); return !!(r && r.ok && (r.values || []).some((v: any) => v === true)); }
+  return false;
+}
+// quitting a game: Steam's library comes back a moment later, so wait until a Steam window is visible again
+let ejectTimer: any = null;
+function scheduleEject(key: string): void {
+  clearTimeout(ejectTimer);
+  const started = Date.now();
+  const tryNow = async () => {
+    ejectTimer = null;
+    if (current.safeMode || !current.ejectAnim) return;
+    if (await playInsertAny(key, true)) return;
+    if (Date.now() - started < 8000) ejectTimer = setTimeout(() => { void tryNow(); }, 400);
+  };
+  ejectTimer = setTimeout(() => { void tryNow(); }, 700);
 }
 async function refreshAny(): Promise<void> {
   if (engine && engine.libraryReachable()) engine.refreshWear();
@@ -385,8 +445,16 @@ function hookLifetime(): void {
         if (current.safeMode) return;
         const key = normId(n.unAppID !== undefined ? n.unAppID : n.appid);
         // the Play-button hook usually got here first; this is the backup for launches it did not see
-        if (n.bRunning) { if (current.insertAnim && key && !(lastAction.key === key && Date.now() - lastAction.t < 15000)) void playInsertAny(key); }
-        else void refreshAny();
+        if (n.bRunning) {
+          if (key) runningGames.add(key);
+          if (key && gate.onRunning(key, Date.now()) && current.insertAnim) void playInsertAny(key);
+          // after the insert animation has had its time (it draws in its own overlay, unaffected by sleeping)
+          setTimeout(updateSleep, 3500);
+        }
+        else {
+          if (key) { runningGames.delete(key); updateSleep(); gate.onExit(key); if (current.ejectAnim) scheduleEject(key); }
+          void refreshAny();
+        }
       } catch (e) { /* never let a notification break Steam */ }
     });
   } catch (e) { /* not available */ }
@@ -396,14 +464,14 @@ function hookLifetime(): void {
     const sc: any = (window as any).SteamClient;
     const reg = sc && sc.Apps && sc.Apps.RegisterForGameActionStart;
     if (reg) {
-      actionHandle = reg.call(sc.Apps, (_id: any, gameId: any, action: any) => {
+      actionHandle = reg.call(sc.Apps, (actionId: any, gameId: any, action: any) => {
         try {
           lifeStats.actions++;
           if (current.safeMode || !current.insertAnim) return;
           if (typeof action === "string" && action.indexOf("Launch") < 0) return; // installs, uninstalls...
           const key = normId(gameId);
           if (!key) return;
-          lastAction = { key, t: Date.now() };
+          if (!gate.onAction(key, actionId, Date.now())) return; // this launch already had its animation
           if (current.insertWhen === "after") schedulePending(key);
           else void playInsertAny(key);
         } catch (e) { /* never let a notification break Steam */ }
@@ -428,6 +496,9 @@ function unhookLifetime(): void {
   try { if (actionHandle && typeof actionHandle.unregister === "function") actionHandle.unregister(); } catch (e) { /* ignore */ }
   try { if (taskHandle && typeof taskHandle.unregister === "function") taskHandle.unregister(); } catch (e) { /* ignore */ }
   if (pending) { clearTimeout(pending.timer); pending = null; }
+  clearTimeout(ejectTimer); ejectTimer = null;
+  try { if (batteryHandle && typeof batteryHandle.unregister === "function") batteryHandle.unregister(); } catch (e) { /* ignore */ }
+  batteryHandle = null;
   lifeHandle = null; actionHandle = null; taskHandle = null;
 }
 
@@ -862,7 +933,7 @@ function Content() {
       </PanelSection>
       <PanelSection title="Insert animation">
         <PanelSectionRow>
-          <ToggleField label="Insert animation on launch" description="Works on its own, with or without the 3D cases. When you press Play the case opens and the disc or game card, printed with the game's art, goes into the slot."
+          <ToggleField label="Insert animation on launch" description="Works on its own, with or without the 3D cases. When you press Play the case opens and the disc or game card, printed with the game's art, goes into the slot. A sealed game's shrink-wrap is torn off on its first launch."
             checked={s.insertAnim} onChange={(v: boolean) => change({ insertAnim: v })} />
         </PanelSectionRow>
         {s.insertAnim && (<>
@@ -885,15 +956,28 @@ function Content() {
           </div>
         </PanelSectionRow>
         <PanelSectionRow>
-          <ToggleField label="Insert sounds" description="Case clicks open, the disc lifts, slides into the slot and the drive spins up"
-            checked={s.insertSound} onChange={(v: boolean) => change({ insertSound: v })} />
-        </PanelSectionRow>
-        <PanelSectionRow>
           <ButtonItem layout="below" onClick={() => { Router.CloseSideMenus(); setTimeout(() => { void playInsertAny(null); }, 450); }}>
             Preview the animation
           </ButtonItem>
         </PanelSectionRow>
         </>)}
+        <PanelSectionRow>
+          <ToggleField label="Eject animation when you quit" description="When you quit a game, the disc or card comes back out of the slot, drops into its case and the case closes"
+            checked={s.ejectAnim} onChange={(v: boolean) => change({ ejectAnim: v })} />
+        </PanelSectionRow>
+        {s.ejectAnim && (
+          <PanelSectionRow>
+            <ButtonItem layout="below" onClick={() => { Router.CloseSideMenus(); setTimeout(() => { void playInsertAny(null, true); }, 450); }}>
+              Preview the eject
+            </ButtonItem>
+          </PanelSectionRow>
+        )}
+        {(s.insertAnim || s.ejectAnim) && (
+          <PanelSectionRow>
+            <ToggleField label="Sounds" description="Case clicks, the disc in the slot, the drive spinning up and down, and the wrap of a sealed game tearing"
+              checked={s.insertSound} onChange={(v: boolean) => change({ insertSound: v })} />
+          </PanelSectionRow>
+        )}
       </PanelSection>
       <PanelSection title="Case shape">
         <PanelSectionRow>
@@ -911,6 +995,18 @@ function Content() {
         </PanelSectionRow>
       </PanelSection>
       <PanelSection title="Effects">
+        <PanelSectionRow>
+          <div className="c3d-hint" style={{ margin: "0 0 4px 0" }}>Less motion: no drifting, shine or leaning neighbours. The covers stay 3D.{s.lessMotion === "battery" ? (onBattery ? " Now: on battery, less motion." : " Now: plugged in, full motion.") : ""}</div>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <div className="c3d-seg3">
+            {(["off", "battery", "always"] as const).map((m) => (
+              <DialogButton key={m} className={s.lessMotion === m ? "on" : ""} onClick={() => change({ lessMotion: m })}>
+                {m === "off" ? "Full motion" : m === "battery" ? "Less on battery" : "Less motion"}
+              </DialogButton>
+            ))}
+          </div>
+        </PanelSectionRow>
         <PanelSectionRow>
           <ToggleField label="Gentle floating on hover" description="Tiny drift left/right and up/down on the game you are on"
             checked={s.float} onChange={(v: boolean) => change({ float: v })} />
@@ -1016,6 +1112,7 @@ export default definePlugin(() => {
   if (tripped && !current.safeMode) enterSafe("The plugin did not survive three starts in a row, so it switched itself off.");
   if (!current.safeMode) { startEngine(); scheduleFallbackChecks(); }
   hookLifetime();
+  watchBattery();
   timers.push(setTimeout(() => { void loadTemplatesNow(); }, 1500));
   routerHook.addRoute(PAGE, CasesPage);
   void be(() => cGetSafe(), 5000).then((fileSafe) => {

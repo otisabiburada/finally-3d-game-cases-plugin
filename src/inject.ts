@@ -58,6 +58,7 @@ const api = {
     return "loading";
   },
   playInsert(key: string | null): boolean { return engine ? engine.playInsert(key) : false; },
+  playEject(key: string | null): boolean { return engine ? engine.playInsert(key, { eject: true }) : false; },
   refresh(): string { if (engine) engine.refreshWear(); return "ok"; },
   stop(): string { if (engine) { engine.stop(); engine = null; } return "stopped"; },
   selfCheck(): CheckLine[] { return engine ? engine.selfCheck() : []; },
