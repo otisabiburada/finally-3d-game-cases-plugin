@@ -146,7 +146,10 @@ Turn on **Insert animation on launch** in its own *Insert animation* section. It
 | Guess look from collection name | Collections called “PS2”, “Xbox 360”, your console names… get that look. |
 | Insert animation on launch | Press Play in the library or on a game page: the case opens and the disc or game card, printed with the game's art, goes into the slot. |
 | Before / After game logo | Play the animation before Steam's game-logo launch screen, or after it (before Steam's small loading animation). |
-| Insert sounds | Case clicks, the disc lifting, the slide into the slot, the drive spinning up. |
+| Eject animation when you quit | Quit a game: the disc comes back out of the slot, drops into its case and the case closes. |
+| Sounds | Case clicks, the disc in the slot, the drive spinning up and down, a sealed game's wrap tearing. |
+| Shrink-wrap tear | A sealed game's wrap is torn off on its first launch (part of the insert animation). |
+| Less motion | *Full motion*, *Less on battery* or *Less motion*: no drifting, shine or leaning neighbours; the covers stay 3D. |
 | Fallback · Safe mode | See *Troubleshooting*. |
 
 ## 🩺 Troubleshooting
@@ -164,7 +167,7 @@ Turn on **Insert animation on launch** in its own *Insert animation* section. It
 
 ## 🔧 How it works
 
-The plugin adds one style sheet to Steam's library window and marks each portrait cover once, when it appears. Covers you're not on are drawn by CSS alone; the 3D box (spine, top, back) is only drawn for the game you're on. Steam's own glow and reflection copies are left alone, and Steam's files are never changed. Turning the plugin off or removing it restores Steam's normal look.
+The plugin adds one style sheet to Steam's library window and marks each portrait cover once, when it appears. Covers you're not on are flat CSS paint (no 3D, no extra GPU layers); only the game you're on becomes 3D, and the 3D box (spine, top, back) is only drawn for it. While a game is running the plugin sleeps: no page watching, timers or animations. Steam's own glow and reflection copies are left alone, and Steam's files are never changed. Turning the plugin off or removing it restores Steam's normal look.
 
 ## 🛠️ Building from source
 

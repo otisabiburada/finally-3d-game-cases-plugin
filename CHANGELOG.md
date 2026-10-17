@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.11.1
+### Near-zero cost
+- **Resting covers are flat now.** Before, every cover on screen was a full 3D object with its own GPU layers (in a 36-game Home row: 210 promoted elements and 70 3D overlay layers on top of Steam's own). Now resting covers are plain 2D paint with the same look (gloss, band, sleeve, wear, shadow): 0 extra layers. Only the game you are on becomes 3D, and it stays 3D until it has turned back, so the turn in and out look the same as before.
+- **Nothing animates forever.** The gentle drift used to loop endlessly on the game you are on; it now plays two slow cycles and stops.
+- **Sleeps while you play.** While a game is running the plugin stops watching Steam's pages, stops its timer and pauses its animations; when the game closes it catches up with one scan.
+- Removed an invisible spine layer that every cover carried.
+
+### Fixed
+- **Insert and eject animations showed a plain black case and disc with the 3D cases switched off.** The animation took its art from the 3D-tagged cover, and with 3D off nothing is tagged; the fallback asked Steam for the art and gave up after 0.6 s. It now finds the game's cover on screen by itself, and otherwise tries Steam's art, your custom art (`customimages`) and Steam's standard cover address all at once, taking the best one that loads within 1.5 s.
+
+## 1.11.0
+### Eject animation (new, its own switch)
+- When you quit a game, the case flies out and opens, the disc (or game card) comes back out of the slot, drops into its tray, and the case closes and flies back to its place. Its own switch under *Insert animation*, with a **Preview the eject** button; it works without the insert animation too.
+- Sounds: the case opens, the drive spins down and pushes the disc out, it drops into the tray, the case shuts.
+- Waits until Steam's window is back after the game closes (up to 8 seconds).
+
+### Shrink-wrap tear on first launch (new)
+- A sealed game (never played, or set to *Sealed* itself) gets its shrink-wrap torn off when you launch it: the glossy wrap with the gold seal is gripped, ripped in two and the pieces fly off, then the case opens as usual. With crinkle and rip sounds.
+- A game you set to *Sealed* yourself switches to normal wear after that. Games sealed because they were never played switch on their own once Steam has played them.
+
+### Less motion (new)
+- *Full motion*, *Less on battery* or *Less motion* (Effects). Less motion turns off the drifting, the foil shine and the leaning neighbours. The covers stay 3D.
+- *Less on battery* follows Steam's charger state and switches back when you plug in.
+
+### Other
+- The insert and eject animations no longer start in a window that isn't laid out yet; the eject tries again a moment later.
+- `npm test` also checks the less-motion settings.
+
+## 1.10.3
+- **Fixed the insert animation sometimes playing twice.** Steam reports a launch twice: when you press Play, and again when the game is actually running. The second report was ignored only for 15 seconds, so when Steam Cloud sync (or a cloud conflict dialog that restarts the launch) took longer, the animation played again. Now each launch plays it once, until that game has exited. Pressing Play again after closing or cancelling still plays it.
+- `npm test` replays Steam's launch reports (cloud sync delay, restarted launch, relaunch...) and checks the animation plays exactly once per launch.
+
 ## 1.10.2
 Update from 1.9.0: install the new zip the same way as before. It replaces the old version and keeps all your looks, wears, names and settings.
 
